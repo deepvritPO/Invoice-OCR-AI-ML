@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+frontend/node_modules/
+backend/data/audit_history.json
