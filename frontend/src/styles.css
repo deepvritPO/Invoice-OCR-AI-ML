@@ -1,0 +1,143 @@
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  color: #0f172a;
+  background-color: #f8fafc;
+}
+
+body {
+  margin: 0;
+}
+
+.container {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 2rem 1rem 3rem;
+}
+
+.subtitle {
+  color: #475569;
+}
+
+.drop-zone {
+  border: 2px dashed #94a3b8;
+  border-radius: 12px;
+  background: white;
+  padding: 1.5rem;
+  margin: 1rem 0;
+}
+
+.inputs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.95rem;
+}
+
+input {
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 0.55rem;
+}
+
+button {
+  background: #0369a1;
+  color: white;
+  border: 0;
+  border-radius: 10px;
+  padding: 0.6rem 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.card {
+  margin-top: 1.5rem;
+  background: white;
+  border-radius: 12px;
+  padding: 1rem 1.2rem;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.08);
+}
+
+.muted {
+  color: #64748b;
+}
+
+.score {
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.score.low {
+  color: #15803d;
+}
+
+.score.medium {
+  color: #a16207;
+}
+
+.score.high {
+  color: #b91c1c;
+}
+
+.error {
+  color: #b91c1c;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+th,
+td {
+  border-bottom: 1px solid #e2e8f0;
+  text-align: left;
+  padding: 0.45rem 0.35rem;
+  vertical-align: top;
+}
+
+.pill {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.18rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.pill.pass {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.pill.warning,
+.pill.data_missing {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.pill.fail {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.pill.not_applicable {
+  background: #e2e8f0;
+  color: #334155;
+}
