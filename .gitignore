@@ -3,4 +3,7 @@ __pycache__/
 .venv/
 node_modules/
 frontend/node_modules/
-backend/data/audit_history.json
+backend/data/
+.env
+*.credentials.json
+frontend/dist/
