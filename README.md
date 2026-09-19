@@ -94,3 +94,7 @@ Open `http://localhost:5173`.
 ## Zero-Inference Rule
 
 If required evidence is unavailable, the API returns explicit `Data Missing` alerts for that control (no guessed outputs).
+
+## Extras
+
+- [`apps/uno-score-tracker/`](apps/uno-score-tracker/) — a standalone, single-file UNO scoreboard (open `index.html`; no build). Unrelated to the audit pipeline.
