@@ -5,6 +5,7 @@ import { HOME_STEP, MAX_TOKENS } from './geometry.js';
 import {
   DEFAULT_RULES,
   createGame,
+  describeMove,
   currentPlayer,
   rollDice,
   legalMoves,
@@ -25,6 +26,20 @@ const THEME_KEY = (typeof window !== 'undefined' && window.LUDO_THEME_KEY) || `$
 const DEFAULT_NAMES = ['You', 'Aarav', 'Priya', 'Rohan', 'Meera'];
 const SEAT_COUNT = 5;
 
+const SPEED_KEY = (typeof window !== 'undefined' && window.LUDO_SPEED_KEY) || `${SAVE_KEY}:speed`;
+
+/**
+ * Pace multipliers. A 4-token 5-player game is ~1200 moves; at 1x that is roughly
+ * three quarters of an hour, which nobody sits through on a phone.
+ *
+ * This scales deliberate WAITING only — the bot's think-time, the pause before a turn
+ * passes and the animation clock. No branch anywhere reads the speed, so the dice, the
+ * bot's choice and the RNG cursor are untouched: the same seed replays the same game at
+ * every setting. test/browser-a11y.mjs asserts that byte-for-byte.
+ */
+const SPEEDS = { normal: 1, fast: 1 / 3, instant: 0 };
+const DEFAULT_SPEED = 'normal';
+
 const BOT_THINK_MS = 550;   // pause before a bot rolls, so the table reads as turn-taking
 const PASS_MS = 700;        // pause on "no legal moves" before the turn passes
 const AUTO_MOVE_MS = 320;   // beat before the single forced move plays itself
@@ -34,6 +49,23 @@ const REJECT_HOLD_MS = 2600;  // how long a rejection stays in #turn-detail befo
 
 const el = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Every deliberate UI pause goes through here, so one control governs the pace. */
+const pace = (ms) => Math.round(ms * (SPEEDS[speedMode] ?? 1));
+
+/**
+ * True on a device whose primary pointer is a finger and that cannot hover — i.e. a
+ * phone or tablet, where there is no keyboard and "press 1-4" is a lie. Queried live
+ * rather than cached: a tablet with a keyboard attached mid-game changes the answer.
+ */
+function touchPrimary() {
+  try {
+    return typeof window.matchMedia === 'function'
+      && window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+  } catch {
+    return false;
+  }
+}
 
 /* ── storage: every access is best-effort, the page works fine without it ────── */
 
@@ -59,6 +91,8 @@ let humanPick = null;     // {ids, playerId} while a human is choosing — drive
 let seenLogIds = new Set();
 let announceFrame = 0;
 let rejectTimer = 0;
+let autoPickTimer = 0;    // the beat before a human's single forced move plays itself
+let speedMode = DEFAULT_SPEED;
 
 /* ── theme ───────────────────────────────────────────────────────────────────── */
 
@@ -80,6 +114,38 @@ function initTheme() {
   el('theme-toggle').addEventListener('click', (event) => {
     const btn = event.target.closest('.theme-btn');
     if (btn) applyTheme(btn.dataset.themeMode);
+  });
+}
+
+/* ── pace ────────────────────────────────────────────────────────────────────── */
+
+function applySpeed(mode, { persist: save = true } = {}) {
+  speedMode = Object.prototype.hasOwnProperty.call(SPEEDS, mode) ? mode : DEFAULT_SPEED;
+  const control = el('speed-control');
+  if (control) {
+    for (const btn of control.querySelectorAll('.pace-btn')) {
+      btn.setAttribute('aria-pressed', String(btn.dataset.speed === speedMode));
+    }
+  }
+  // The renderer may not exist yet on first load; ensureRenderer() re-applies it.
+  if (renderer) renderer.setSpeed(SPEEDS[speedMode]);
+  if (save) writeStore(SPEED_KEY, speedMode);
+}
+
+function initSpeed() {
+  const stored = readStore(SPEED_KEY);
+  applySpeed(stored, { persist: false });
+  const control = el('speed-control');
+  if (!control) return;
+  control.addEventListener('click', (event) => {
+    const btn = event.target.closest('.pace-btn');
+    // Re-pressing the pressed button changed nothing but still burned an utterance,
+    // so four taps on "Fast" spoke "Speed: Fast" four times over the game narration.
+    if (!btn || btn.dataset.speed === speedMode) return;
+    applySpeed(btn.dataset.speed);
+    const said = `Speed: ${btn.textContent.trim()}`;
+    // Speaking over an open pick left the prompt no longer the last thing heard.
+    speak(moveResolver ? `${said}. ${pickPrompt()}` : said);
   });
 }
 
@@ -154,6 +220,7 @@ function ensureRenderer() {
   if (!renderer) {
     renderer = createRenderer(el('board'), { onTokenClick: pickToken });
     renderer.mount();
+    renderer.setSpeed(SPEEDS[speedMode]);
   }
   return renderer;
 }
@@ -215,6 +282,184 @@ function verbPhrase(player, phrase) {
   return [BASE_FORM.get(first) ?? first, ...rest].join(' ');
 }
 
+/* ── the move picker ─────────────────────────────────────────────────────────── */
+
+/**
+ * One large, labelled button per legal move, rendered under the dice card.
+ *
+ * This is the primary input on a phone. The board's tap targets are a cell wide
+ * (~17 CSS px at 390px, still under the WCAG 2.2 minimum of 24) and no amount of
+ * scaling fixes that: a 24px cell needs a ~520px-wide board. So the board stays a
+ * display and the picking happens here, on full-width 48px controls — which is also
+ * the best route for a screen reader, since each button says what the move DOES
+ * instead of making the player deduce it from a coloured disc.
+ *
+ * The buttons, the board tokens and the 1-4 keys are three routes to ONE pick: each
+ * calls pickToken(), which resolves the turn loop's single promise and then clears
+ * all three. Nothing here holds state of its own.
+ */
+function renderMovePicker(moves) {
+  const card = el('move-picker');
+  const list = el('move-picker-list');
+  const note = el('move-picker-note');
+  if (!card || !list) return;
+
+  list.replaceChildren();
+  for (const move of moves) {
+    const number = Number(/t(\d+)$/.exec(move.tokenId)?.[1] || 1);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `move-btn p${move.playerId}`;
+    btn.dataset.tokenId = move.tokenId;
+
+    const swatch = document.createElement('span');
+    swatch.className = 'move-swatch';
+    swatch.setAttribute('aria-hidden', 'true');
+    swatch.textContent = String(number);
+
+    const who = document.createElement('span');
+    who.className = 'move-token';
+    who.textContent = `Token ${number}`;
+
+    // Decorative only: a screen reader reading "middle dot" between every clause
+    // would be noise, and the accessible name is built from the visible text.
+    const sep = document.createElement('span');
+    sep.className = 'move-sep';
+    sep.setAttribute('aria-hidden', 'true');
+    sep.textContent = '·';
+
+    const what = document.createElement('span');
+    what.className = 'move-what';
+    what.textContent = describeMove(game, move);
+
+    btn.append(swatch, who, sep, what);
+    list.append(btn);
+  }
+
+  const single = moves.length === 1;
+  card.classList.toggle('move-picker--single', single);
+  card.hidden = false;
+  // "Tap the dice, then tap one of the move buttons" is roll-phase guidance, and the
+  // dice is disabled by now. Dropping it while the picker is open shortens the turn
+  // card by about a line, which is what stops the sticky picker overlapping it on a
+  // phone — the picker was clipping the last line of the very hint it answers.
+  const hint = el('dice-hint');
+  if (hint) hint.hidden = true;
+  // On desktop a stack of one button is clutter, and the turn loop plays a forced
+  // move by itself anyway — so say so rather than pretending there is a choice.
+  // (setPickerNote only writes into a visible card, hence the order.)
+  if (note) setPickerNote(defaultPickerNote());
+
+  // On a phone the panel starts below the board, so the picker can open just under
+  // the fold. Sticky positioning (see styles.css) pins it to the bottom of the
+  // viewport there; this only nudges the page when it genuinely is out of sight.
+  scrollPickerIntoView(card);
+}
+
+/**
+ * Nudge the page just far enough that the picker is not below the fold — and no
+ * further. A plain scrollIntoView() answers "show me this" by scrolling the board
+ * clean off the top of a 560px screen, which trades one buried thing for a worse
+ * one. So the scroll is capped at the board's own headroom — the empty space ABOVE
+ * it — and the board's top edge therefore never leaves the viewport. The exception is
+ * the landscape layout, where the board is itself position: sticky and cannot be
+ * scrolled away at all; there the cap lifts.
+ *
+ * Measured with a three-move picker, rolled from the keyboard so nothing auto-scrolls:
+ * iPhone 12 board 71..430 / picker 442..654 of 664; Pixel 5 107..469 / 505..717 of 727;
+ * 360x560 28..359 / 372..550; 320x480 0..295 / 307..485, i.e. 97% of the picker. The
+ * sticky rule in styles.css is what keeps the remainder reachable as the player
+ * scrolls; it does not lift the card on its own before then.
+ */
+function scrollPickerIntoView(card) {
+  try {
+    const fold = window.innerHeight || document.documentElement.clientHeight;
+    const box = card.getBoundingClientRect();
+    if (box.top >= 0 && box.bottom <= fold) return;
+    const wanted = Math.ceil(box.bottom - fold) + 10;
+    if (wanted <= 0) return;
+    const board = document.querySelector('.board-wrap');
+    const rect = board ? board.getBoundingClientRect() : null;
+    // Free space above the board costs nothing to scroll away. Past that we would be
+    // eating the board itself: the old budget also spent a third of the board, which
+    // on a 320x480 phone scrolled 33% of it off the top — exactly the trade this
+    // function exists to refuse. Headroom is the whole budget; whatever is still cut
+    // off is answered by the sticky rule in styles.css, which pins the picker to the
+    // bottom of the viewport.
+    // ...unless the board is pinned. In the short-and-wide landscape layout it is
+    // position: sticky, so scrolling cannot push its top edge off at all and there is
+    // nothing left for the cap to protect.
+    const pinned = board && getComputedStyle(board).position === 'sticky';
+    const budget = pinned ? wanted : (rect ? Math.max(0, Math.floor(rect.top)) : wanted);
+    const by = Math.min(wanted, budget);
+    if (by > 0) window.scrollBy({ top: by, left: 0, behavior: 'instant' });
+  } catch { /* older engines: the sticky fallback still keeps it reachable */ }
+}
+
+/**
+ * The picker's own caption. On a phone the sticky picker covers #turn-detail, so a
+ * message written only there is invisible to a sighted player — the reason for a
+ * refused tap reached the screen reader and nothing else. Anything the player must
+ * read while the picker is open goes here as well.
+ */
+function setPickerNote(text, { reject: isReject = false } = {}) {
+  const note = el('move-picker-note');
+  const card = el('move-picker');
+  if (!note || !card || card.hidden) return;
+  note.textContent = text || '';
+  note.hidden = !text;
+  note.classList.toggle('move-picker-note--reject', Boolean(text) && isReject);
+  // The note makes the card taller; on a short phone that can push its foot under
+  // the fold, so re-apply the same capped nudge the picker got when it opened.
+  if (text) scrollPickerIntoView(card);
+}
+
+/** What the note says when nothing has been refused: the forced-move caption, or nothing. */
+function defaultPickerNote() {
+  const card = el('move-picker');
+  return card && card.classList.contains('move-picker--single')
+    ? 'Only one move — playing it.'
+    : '';
+}
+
+function clearMovePicker() {
+  const card = el('move-picker');
+  const list = el('move-picker-list');
+  const hint = el('dice-hint');
+  if (hint) hint.hidden = false;
+  if (list) list.replaceChildren();
+  if (card) {
+    card.hidden = true;
+    card.classList.remove('move-picker--single');
+  }
+  const note = el('move-picker-note');
+  if (note) {
+    note.textContent = '';
+    note.hidden = true;
+    note.classList.remove('move-picker-note--reject');
+  }
+  if (renderer) renderer.highlightToken(null);
+}
+
+function initMovePicker() {
+  const list = el('move-picker-list');
+  if (!list) return;
+  // Delegated, so the handlers survive every re-render of the button set.
+  list.addEventListener('click', (event) => {
+    const btn = event.target.closest('.move-btn');
+    if (btn) pickToken(btn.dataset.tokenId);
+  });
+  const preview = (event) => {
+    const btn = event.target.closest('.move-btn');
+    if (renderer) renderer.highlightToken(btn ? btn.dataset.tokenId : null);
+  };
+  const clear = () => { if (renderer) renderer.highlightToken(null); };
+  list.addEventListener('pointerover', preview);
+  list.addEventListener('pointerout', clear);
+  list.addEventListener('focusin', preview);
+  list.addEventListener('focusout', clear);
+}
+
 /**
  * #announcer is aria-live="polite": writing the same string twice is a no-op for most
  * screen readers, so clear it and set it on the next frame. Rejecting the same token
@@ -229,15 +474,61 @@ function speak(text) {
   else say();
 }
 
-function announce(text, detail) {
+/**
+ * Write the turn banner, and optionally speak it.
+ *
+ * At Instant a whole bot lap lands in half a second: measured, 5 full sentences in
+ * 528ms against 19 over 18.3s at Normal. A polite queue needs ~10-15s to drain that,
+ * so from the first lap on the screen reader narrates a board that no longer exists —
+ * including while the human is being asked to roll. When there is no deliberate pause
+ * left to narrate, the bots' running commentary is dropped; #log-list (also
+ * aria-live="polite") still carries every move, so nothing is actually lost.
+ * The human's own prompts always speak.
+ */
+function announce(text, detail, { speakIt = true } = {}) {
   el('turn-banner').textContent = text;
   if (detail !== undefined) el('turn-detail').textContent = detail;
-  speak(detail ? `${text}. ${detail}` : text);
+  if (speakIt) speak(detail ? `${text}. ${detail}` : text);
+}
+
+/** True when the pace still leaves room between utterances. */
+const narrating = () => (SPEEDS[speedMode] ?? 1) !== 0;
+
+/** announce() for a seat that may be a bot: silent for bots when there is no pace. */
+function announceTurn(player, text, detail) {
+  announce(text, detail, { speakIt: player.kind === 'human' || narrating() });
 }
 
 /** The guidance line shown while the human is choosing a token. */
 function pickPrompt() {
-  return `Pick a token — click it, or press 1–${game ? game.tokensPerPlayer : MAX_TOKENS}.`;
+  // A phone has no keyboard, so "press 1-4" is not a fallback there — it is a dead
+  // end. The move buttons are named first on touch because they are the real target.
+  if (touchPrimary()) return 'Pick a token — tap a move below, or tap it on the board.';
+  return `Pick a token — press a move below, click it, or press 1–${game ? game.tokensPerPlayer : MAX_TOKENS}.`;
+}
+
+/**
+ * The hint under the dice. The old copy hard-coded "Click the dice, or press Space…
+ * pressing 1-4", every word of which is false on a phone. Rebuilt from the live
+ * pointer type, and re-rendered when that changes (a tablet gaining a keyboard).
+ */
+function renderDiceHint() {
+  const hint = el('dice-hint');
+  if (!hint) return;
+  const tokens = game ? game.tokensPerPlayer : MAX_TOKENS;
+  hint.replaceChildren();
+  if (touchPrimary()) {
+    hint.append('Tap the dice, then tap one of the move buttons that appear — or tap a token on the board.');
+    return;
+  }
+  const kbd = (text, id) => {
+    const node = document.createElement('kbd');
+    node.textContent = text;
+    if (id) node.id = id;
+    return node;
+  };
+  hint.append('Click the dice, or press ', kbd('Space'), '. Then pick a token by clicking it or pressing ',
+    kbd('1'), '–', kbd(String(tokens), 'dice-hint-max'), '.');
 }
 
 /**
@@ -246,6 +537,8 @@ function pickPrompt() {
  */
 function reject(reason) {
   el('turn-detail').textContent = reason;
+  // ...and again inside the picker, which is what a phone player can actually see.
+  setPickerNote(reason, { reject: true });
   speak(reason);
   // One timer only: a second rejection must not be wiped by the first one's restore.
   if (rejectTimer) clearTimeout(rejectTimer);
@@ -253,7 +546,9 @@ function reject(reason) {
   if (moveResolver) {
     rejectTimer = setTimeout(() => {
       rejectTimer = 0;
-      if (moveResolver) el('turn-detail').textContent = pickPrompt();
+      if (!moveResolver) return;
+      el('turn-detail').textContent = pickPrompt();
+      setPickerNote(defaultPickerNote());
     }, REJECT_HOLD_MS);
   }
 }
@@ -301,7 +596,13 @@ function rejectReason(tokenId) {
 
 function setBusy(busy) {
   document.body.classList.toggle('is-busy', busy);
-  el('dice').disabled = busy || !game || game.phase !== 'roll';
+  const dice = el('dice');
+  const hadDice = document.activeElement === dice;
+  dice.disabled = busy || !game || game.phase !== 'roll';
+  // Disabling the focused dice blurs it to <body>, and the ~580ms of dice tumble
+  // before the picker opens was spent there — long enough that Arrow/Home/End on the
+  // board did nothing for a keyboard player who had just pressed Space (SPEC 8).
+  if (hadDice && dice.disabled) recoverFocus();
 }
 
 /** The seat this browser's user plays, so the renderer knows whose tokens are controls. */
@@ -337,8 +638,15 @@ function cancelPendingInput() {
   rollResolver = null;
   moveResolver = null;
   humanPick = null;
+  clearAutoPick();
+  clearMovePicker();
   if (roll) roll();
   if (move) move.resolve(null);
+}
+
+function clearAutoPick() {
+  if (autoPickTimer) clearTimeout(autoPickTimer);
+  autoPickTimer = 0;
 }
 
 function requestRoll() {
@@ -366,7 +674,7 @@ function pickTokenByNumber(n) {
 function waitForRoll(player) {
   if (player.kind === 'ai') {
     setBusy(true);
-    return sleep(BOT_THINK_MS);
+    return sleep(pace(BOT_THINK_MS));
   }
   setBusy(false);
   focusDice();
@@ -412,16 +720,39 @@ async function waitForTokenChoice(moves) {
   humanPick = { ids, playerId: game.turn };
   syncBoard(ids, null);
   renderer.pulseTokens(ids);
+  renderMovePicker(moves);
   setBusy(false);
+  // Focus stays on the board so the renderer's Arrow/Home/End roving is reachable
+  // (SPEC 8); Tab from there walks straight into the picker buttons.
   focusToken(ids[0]);
+  // A forced single move still plays itself after a beat — but it goes through the
+  // same pickToken() route, so pressing the button just plays it sooner.
+  clearAutoPick();
+  if (moves.length === 1) {
+    autoPickTimer = setTimeout(() => {
+      autoPickTimer = 0;
+      pickToken(ids[0]);
+    }, Math.max(pace(AUTO_MOVE_MS), 0));
+  }
   const tokenId = await new Promise((resolve) => { moveResolver = { ids, resolve }; });
+  clearAutoPick();
   moveResolver = null;
   humanPick = null;
+  // Emptying the picker removes whatever button the player just pressed, which would
+  // otherwise drop focus on <body> (SPEC 8). Hand it to the token they chose — the
+  // same place a click on the board would have left it.
+  const list = el('move-picker-list');
+  const cameFromPicker = Boolean(list && document.activeElement && list.contains(document.activeElement));
   renderer.clearPulse();
+  clearMovePicker();
+  if (cameFromPicker && tokenId) {
+    const node = document.querySelector(`[data-token-id="${tokenId}"]`);
+    if (node) node.focus({ preventScroll: true });
+  }
   if (tokenId === null) return null;   // cancelled by New game / Rematch
   setBusy(true);
   syncBoard(ids, tokenId);          // flash the selection before the token starts moving
-  await sleep(SELECT_FLASH_MS);
+  await sleep(pace(SELECT_FLASH_MS));
   return tokenId;
 }
 
@@ -432,6 +763,30 @@ async function playEvents(events, state) {
     if (event.type === 'move') await renderer.animateMove(event, state);
     else if (event.type === 'capture') await renderer.animateCapture(event, state);
   }
+  recoverFocus();
+}
+
+/**
+ * SPEC 8's "focus never parks on <body>", enforced after the fact.
+ *
+ * render.js now carries focus across the re-parent that raises the moving token (the
+ * one bug that actually caused this), but an animation is the moment when the DOM
+ * churns most, and a bot capturing the token the player had focused is a second way
+ * to lose it. One cheap net after every animation batch: put focus back on the
+ * board's current tab stop, which is where the Arrow/Home/End roving lives. It only
+ * ever acts on focus that is already gone, so it cannot steal it from a live control.
+ */
+function recoverFocus() {
+  const active = document.activeElement;
+  const lost = !active
+    || active === document.body
+    || !active.isConnected
+    || active.getClientRects().length === 0;
+  if (!lost) return;
+  const stop = document.querySelector('.token[tabindex="0"]');
+  if (stop) { stop.focus({ preventScroll: true }); return; }
+  const dice = el('dice');
+  if (dice && !dice.disabled) dice.focus({ preventScroll: true });
 }
 
 async function runLoop() {
@@ -442,7 +797,7 @@ async function runLoop() {
     const player = currentPlayer(game);
 
     if (game.phase === 'roll') {
-      announce(`${possessive(player)} turn`, player.kind === 'human' ? 'Roll the dice.' : 'Thinking…');
+      announceTurn(player, `${possessive(player)} turn`, player.kind === 'human' ? 'Roll the dice.' : 'Thinking…');
       syncBoard();
       renderer.setDice(game.dice, { rolling: false });
       await waitForRoll(player);
@@ -456,14 +811,14 @@ async function runLoop() {
       const rolled = rollDice(game);
       game = rolled.state;
       renderer.setDice(rolled.roll, { rolling: false });
-      announce(`${player.name} rolled ${rolled.roll}`);
+      announceTurn(player, `${player.name} rolled ${rolled.roll}`);
       drainEngineLog();
 
       // A third consecutive six forfeits the turn: the engine hands us back phase 'roll'.
       if (game.phase !== 'move') {
-        announce(`${player.name} rolled a third six`, 'Turn forfeited.');
+        announceTurn(player, `${player.name} rolled a third six`, 'Turn forfeited.');
         persist();
-        await sleep(PASS_MS);
+        await sleep(pace(PASS_MS));
         continue;
       }
     }
@@ -471,9 +826,9 @@ async function runLoop() {
     const moves = legalMoves(game);
 
     if (moves.length === 0) {
-      announce(`${player.name} ${verb(player, 'has', 'have')} no legal move`, 'Passing…');
+      announceTurn(player, `${player.name} ${verb(player, 'has', 'have')} no legal move`, 'Passing…');
       syncBoard();
-      await sleep(PASS_MS);
+      await sleep(pace(PASS_MS));
       if (!alive()) return;
       const passed = passTurn(game);
       game = passed.state;
@@ -484,19 +839,24 @@ async function runLoop() {
     }
 
     let tokenId;
-    if (moves.length === 1) {
-      announce(`${player.name} ${verb(player, 'has', 'have')} one move`, 'Playing it.');
+    if (player.kind === 'ai' && moves.length === 1) {
+      announceTurn(player, `${player.name} ${verb(player, 'has', 'have')} one move`, 'Playing it.');
       syncBoard([moves[0].tokenId], moves[0].tokenId);
-      await sleep(AUTO_MOVE_MS);
+      await sleep(pace(AUTO_MOVE_MS));
       tokenId = moves[0].tokenId;
     } else if (player.kind === 'ai') {
-      announce(`${player.name} ${verb(player, 'is', 'are')} choosing`, `Rolled ${game.dice}.`);
+      announceTurn(player, `${player.name} ${verb(player, 'is', 'are')} choosing`, `Rolled ${game.dice}.`);
       syncBoard(moves.map((m) => m.tokenId));
-      await sleep(BOT_THINK_MS);
+      await sleep(pace(BOT_THINK_MS));
       if (!alive()) return;
       const move = chooseMove(game, moves, player.aiLevel);
       pushLog(`${player.name} ${verbPhrase(player, describeChoice(move))}`, player.id);
       tokenId = move.tokenId;
+    } else if (moves.length === 1) {
+      // A human's forced move still goes through the picker, so the panel always
+      // shows what is about to happen — and a tap plays it without the wait.
+      announce(`${player.name} ${verb(player, 'has', 'have')} one move`, 'Playing it.');
+      tokenId = await waitForTokenChoice(moves);
     } else {
       announce(`${player.name} rolled ${game.dice}`, pickPrompt());
       tokenId = await waitForTokenChoice(moves);
@@ -530,9 +890,10 @@ function beginGame(state, seatList) {
   showScreen('game');
   closeResults();
   // The static hint used to say "1-4" in every game, contradicting pickPrompt() in
-  // 2- and 3-token games. Both now read game.tokensPerPlayer.
-  const hintMax = el('dice-hint-max');
-  if (hintMax) hintMax.textContent = String(game.tokensPerPlayer);
+  // 2- and 3-token games. Both now read game.tokensPerPlayer — and the whole line is
+  // rebuilt for the pointer type, so a phone is never told to press Space.
+  renderDiceHint();
+  clearMovePicker();
   syncBoard();
   renderer.setDice(game.dice, { rolling: false });
   persist();
@@ -565,6 +926,8 @@ function rematch() {
 
 function endGame() {
   dropStore(SAVE_KEY);
+  clearAutoPick();
+  clearMovePicker();
   setBusy(false);
   announce('Game over', 'Final standings are in.');
   syncBoard();
@@ -759,6 +1122,23 @@ function initGameControls() {
   });
 }
 
+/**
+ * A tablet that gains or loses a keyboard changes what the hint should say. Cheap to
+ * watch, and it keeps the copy honest without caching the answer anywhere.
+ */
+function initPointerWatch() {
+  try {
+    if (typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia('(hover: none) and (pointer: coarse)');
+    const onChange = () => {
+      renderDiceHint();
+      if (moveResolver) el('turn-detail').textContent = pickPrompt();
+    };
+    if (typeof query.addEventListener === 'function') query.addEventListener('change', onChange);
+    else if (typeof query.addListener === 'function') query.addListener(onChange);
+  } catch { /* no matchMedia — the desktop wording stands */ }
+}
+
 function initKeyboard() {
   document.addEventListener('keydown', (event) => {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
@@ -799,9 +1179,12 @@ function initKeyboard() {
 }
 
 initTheme();
+initSpeed();
+initMovePicker();
 initSetupForm();
 initGameControls();
 initResultsFocus();
 initKeyboard();
+initPointerWatch();
 showScreen('setup');
 offerResume();

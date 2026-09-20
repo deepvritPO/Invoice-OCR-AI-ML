@@ -201,7 +201,13 @@ kbd {
   gap: 10px;
   align-items: center;
   justify-content: space-between;
-  padding: 10px clamp(12px, 3vw, 28px);
+  /* viewport-fit=cover (index.html) lets the page paint under the notch and the
+     home indicator. Only the bottom inset used to be honoured, which put the theme
+     buttons inside the 47px landscape notch band on an iPhone. Honour all four. */
+  padding: max(10px, env(safe-area-inset-top, 0px))
+           max(clamp(12px, 3vw, 28px), env(safe-area-inset-right, 0px))
+           10px
+           max(clamp(12px, 3vw, 28px), env(safe-area-inset-left, 0px));
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--surface) 72%, transparent);
   backdrop-filter: blur(8px);
@@ -275,7 +281,11 @@ kbd {
 
 /* ── screens ──────────────────────────────────────────────────────────────── */
 
-main { padding: clamp(12px, 2.4vw, 26px); }
+main {
+  padding: clamp(12px, 2.4vw, 26px);
+  padding-left: max(clamp(12px, 2.4vw, 26px), env(safe-area-inset-left, 0px));
+  padding-right: max(clamp(12px, 2.4vw, 26px), env(safe-area-inset-right, 0px));
+}
 
 .screen-setup {
   max-width: 980px;
@@ -457,7 +467,7 @@ select:disabled, input:disabled { opacity: .55; }
   .panel { max-width: none; }
 }
 
-.turn-card, .log-card, .rules {
+.turn-card, .log-card, .rules, .move-picker, .pace-card {
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -503,6 +513,109 @@ select:disabled, input:disabled { opacity: .55; }
   20%      { transform: rotate(-16deg) scale(1.08); }
   45%      { transform: rotate(14deg) scale(1.1); }
   70%      { transform: rotate(-8deg) scale(1.04); }
+}
+
+/* ── the move picker ──────────────────────────────────────────────────────────
+   The primary input on a phone: the board's own tap targets are one cell wide
+   (~17 CSS px at 390px), so the picking happens on full-width controls instead.
+   44px is the WCAG 2.2 AAA target; these are 48 plus 10px of gap, so a mis-tap
+   lands on nothing rather than on the wrong move. */
+
+.move-picker[hidden] { display: none; }
+.move-picker .card-title { margin-bottom: .5rem; }
+
+.move-list { display: flex; flex-direction: column; gap: 10px; }
+
+.move-btn {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 48px;
+  padding: .55rem .7rem;
+  font: inherit;
+  text-align: left;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-left: 5px solid var(--player);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color .12s ease, transform .08s ease, box-shadow .12s ease;
+}
+
+.move-btn:hover { background: var(--surface-3); }
+/* The press state has to be unmistakable on a touch screen, where there is no
+   hover to confirm the finger landed on the button. */
+.move-btn:active {
+  transform: translateY(1px) scale(.995);
+  background: color-mix(in srgb, var(--player) 18%, var(--surface-2));
+  box-shadow: inset 0 0 0 2px var(--player);
+}
+
+.move-swatch {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: var(--player);
+  color: var(--player-ink, #fff);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--player-ink, #fff) 55%, transparent);
+}
+
+.move-token { font-weight: 700; white-space: nowrap; }
+.move-sep { color: var(--muted); }
+.move-what { color: var(--muted); font-size: 13.5px; }
+.move-picker-note { margin: 0 0 .5rem; }
+/* A refused tap used to write its reason into #turn-detail only — which on a phone
+   sits UNDER the sticky picker, so the sighted player got no feedback at all. The
+   reason is now mirrored here, inside the card the player is already looking at. */
+.move-picker-note--reject {
+  padding: .4rem .55rem;
+  border-radius: var(--radius-sm);
+  border-left: 4px solid var(--warn, var(--accent));
+  background: var(--surface-2);
+  color: var(--text);
+  font-weight: 600;
+}
+/* One move is not a choice — the turn loop plays it by itself. Keep the row, drop
+   the emphasis, so the desktop panel does not sprout a card per forced move. */
+.move-picker--single .move-btn { min-height: 44px; background: var(--surface); }
+
+/* ── pace control ─────────────────────────────────────────────────────────── */
+
+.pace-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.pace-label { font-size: 13px; font-weight: 600; color: var(--muted); }
+.pace-toggle { display: flex; gap: 4px; }
+.pace-btn {
+  appearance: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  min-height: 34px;
+  padding: .3rem .6rem;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.pace-btn:hover { background: var(--surface-2); color: var(--text); }
+.pace-btn[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--bg);
 }
 
 .player-cards {
@@ -720,6 +833,15 @@ body.is-busy .token { cursor: not-allowed; }
 }
 .token--goal .token-disc { opacity: .9; stroke-dasharray: 3 3; }
 
+/* Pointed at from the move picker — the panel and the board naming the same piece.
+   Purely decorative: it carries no state the pick depends on. */
+.token--preview .token-disc {
+  stroke: var(--focus);
+  stroke-width: 5;
+  animation: none;
+}
+.token--preview .token-hit { stroke: none; }
+
 @keyframes token-pulse {
   0%, 100% { transform: scale(1); }
   50%      { transform: scale(1.11); }
@@ -741,9 +863,75 @@ body.is-busy .token { cursor: not-allowed; }
 
 /* ── narrow screens ───────────────────────────────────────────────────────── */
 
+/* Under 900px the panel stacks BELOW the board, and the board is as wide as the
+   viewport allows — so after a roll the picker opens just past the fold. Shrinking
+   the board to make room would shrink the tokens with it, which is the opposite of
+   what a phone needs. Sticky positioning solves it instead: the picker pins itself
+   to the bottom of the viewport while the player is still looking at the board, and
+   scrolls into the panel's flow as they scroll down. It is only in the document
+   while a human is actually choosing, so nothing is permanently covered. */
+@media (max-width: 899px) {
+  .move-picker {
+    position: sticky;
+    bottom: max(10px, env(safe-area-inset-bottom, 0px));
+    z-index: 6;
+    background: var(--surface);
+    box-shadow: var(--shadow-2), 0 0 0 1px var(--border);
+  }
+}
+
+/* A short, wide phone (landscape) is NOT the tall portrait stack. The rule above
+   keys on width alone, so an iPhone 12 held sideways (750x340) inherited a 265px
+   board stacked on top of a 270px picker — 535px of content in a 340px viewport,
+   with 485px of side margin sitting empty. Best simultaneous visibility anywhere in
+   the scroll range was 60% of the board plus 61% of the picker.
+
+   Below 520px of height the side margin carries the panel instead, and the board is
+   made sticky so it stays fully on screen while the picker scrolls under the thumb. */
+@media (max-width: 899px) and (min-width: 560px) and (max-height: 520px) {
+  main { padding-top: 8px; padding-bottom: 8px; }
+  .screen-game {
+    grid-template-columns: auto minmax(260px, 1fr);
+    justify-items: stretch;
+    align-items: start;
+    gap: 12px;
+  }
+  .board-wrap {
+    --board-size: min(46vw, calc(100vh - 86px));
+    justify-self: center;
+    position: sticky;
+    top: 8px;
+  }
+  .panel { max-width: none; }
+  /* Two columns means the picker no longer has to overlay anything to be reached. */
+  .move-picker { position: static; box-shadow: var(--shadow-1); }
+}
+
+/* A 480px-tall phone has ~175px of room under a 295px board. Since the scroll into
+   the picker is now capped at the board's own headroom (js/ui.js), the picker has to
+   earn that room back: the card heading goes to the screen reader only — three
+   self-describing buttons under the dice need no "Your move" label to be understood —
+   and the chrome around the buttons tightens. The buttons themselves stay 48px. */
+@media (max-height: 620px) and (max-width: 899px) {
+  .move-picker { padding: 8px 10px; }
+  .move-picker .card-title {
+    position: absolute;
+    width: 1px; height: 1px;
+    margin: -1px; padding: 0;
+    overflow: hidden; clip-path: inset(50%);
+    white-space: nowrap; border: 0;
+  }
+  .move-list { gap: 8px; }
+  .move-picker-note { margin-bottom: .35rem; }
+}
+
 @media (max-width: 560px) {
   body { font-size: 14.5px; }
-  main { padding: 10px; }
+  main {
+    padding: 10px;
+    padding-left: max(10px, env(safe-area-inset-left, 0px));
+    padding-right: max(10px, env(safe-area-inset-right, 0px));
+  }
   .seat {
     grid-template-columns: auto 1fr;
     grid-template-areas:
@@ -759,4 +947,7 @@ body.is-busy .token { cursor: not-allowed; }
   .seat .field:nth-of-type(3) { grid-area: level; }
   .player-cards { grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); }
   .dice { width: 56px; height: 56px; font-size: 26px; }
+  /* Body text drops to 14.5px here; the picker rows must not follow it down. */
+  .move-what { font-size: 13px; }
+  .move-btn { min-height: 48px; }
 }

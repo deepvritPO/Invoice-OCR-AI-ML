@@ -264,8 +264,11 @@
            ui.js fills and empties it — it is hidden whenever there is nothing to pick. -->
       <section id="move-picker" class="move-picker" aria-labelledby="move-picker-title" hidden>
         <h2 id="move-picker-title" class="card-title">Your move</h2>
-        <div id="move-picker-list" class="move-list"></div>
+        <!-- Above the buttons on purpose: a refused tap has to be readable without
+             scrolling past a stack of 48px controls, and on a short phone the bottom
+             of this card is under the fold. -->
         <p id="move-picker-note" class="hint move-picker-note" hidden></p>
+        <div id="move-picker-list" class="move-list"></div>
       </section>
 
       <ul id="player-cards" class="player-cards">

@@ -545,6 +545,132 @@ test('a seeded all-bot game always reaches phase "over" inside the move budget',
   }
 });
 
+/* ── describeMove: the label the move picker puts on its buttons ───────────── */
+
+test('describeMove names the most consequential fact about a move', () => {
+  // exit
+  const exit = scenario({ turn: 0, dice: 6, tokens: { 0: [inBase(), inBase()] } });
+  assert.equal(E.describeMove(exit, E.legalMoves(exit)[0]), 'leaves base');
+
+  // plain advance: from -> to, in progress coordinates
+  const walk = scenario({ turn: 0, dice: 5, tokens: { 0: [onTrack(12)] } });
+  const walkMove = E.legalMoves(walk).find((m) => m.tokenId === 'p0t1');
+  assert.equal(E.describeMove(walk, walkMove), '12 → 17');
+
+  // a landing on a safe cell says so
+  const safeT = progressFor(0, SAFE_CELL);
+  const safe = scenario({ turn: 0, dice: 3, tokens: { 0: [onTrack(safeT - 3)] } });
+  const safeMove = E.legalMoves(safe).find((m) => m.tokenId === 'p0t1');
+  assert.ok(isSafe(safeMove.toCell.index));
+  assert.equal(E.describeMove(safe, safeMove), `${safeT - 3} → ${safeT} · safe cell`);
+
+  // entering the home run counts down to the goal
+  const enter = scenario({ turn: 0, dice: 3, tokens: { 0: [onTrack(RING - 1)] } });
+  const enterMove = E.legalMoves(enter).find((m) => m.tokenId === 'p0t1');
+  assert.equal(enterMove.kind, 'enterHome');
+  assert.equal(E.describeMove(enter, enterMove), 'enters the home run · 3 to go');
+
+  // a further step inside the home run, singular this time
+  const inHome = scenario({ turn: 0, dice: 1, tokens: { 0: [onTrack(HOME_STEP - 2)] } });
+  const inHomeMove = E.legalMoves(inHome).find((m) => m.tokenId === 'p0t1');
+  assert.equal(E.describeMove(inHome, inHomeMove), 'up the home run · 1 to go');
+
+  // the goal outranks everything else
+  const goal = scenario({ turn: 0, dice: 4, tokens: { 0: [onTrack(HOME_STEP - 4)] } });
+  const goalMove = E.legalMoves(goal).find((m) => m.tokenId === 'p0t1');
+  assert.equal(goalMove.kind, 'goal');
+  assert.equal(E.describeMove(goal, goalMove), 'home!');
+});
+
+test('describeMove names the victim of a capture, and outranks the plain advance', () => {
+  const attacker = progressFor(0, PLAIN_CELL) - 4;
+  const victim = progressFor(2, PLAIN_CELL);
+  const s = scenario({
+    turn: 0, dice: 4,
+    tokens: { 0: [onTrack(attacker)], 2: [onTrack(victim)] },
+  });
+  const move = E.legalMoves(s).find((m) => m.tokenId === 'p0t1');
+  assert.deepEqual(move.captures, ['p2t1']);
+  assert.equal(E.describeMove(s, move), `captures Bot 3 on cell ${PLAIN_CELL}`);
+
+  // Two victims on the same cell, one owner — which is a block, so the rule has to
+  // be off for the move to exist at all.
+  const two = scenario({
+    turn: 0, dice: 4, rules: { blocks: false },
+    tokens: { 0: [onTrack(attacker)], 2: [onTrack(victim), onTrack(victim)] },
+  });
+  const twoMove = E.legalMoves(two).find((m) => m.tokenId === 'p0t1');
+  assert.equal(twoMove.captures.length, 2);
+  assert.equal(E.describeMove(two, twoMove), `captures 2 of Bot 3's on cell ${PLAIN_CELL}`);
+
+  // two owners on the same cell
+  const both = scenario({
+    turn: 0, dice: 4,
+    tokens: {
+      0: [onTrack(attacker)],
+      2: [onTrack(victim)],
+      3: [onTrack(progressFor(3, PLAIN_CELL))],
+    },
+  });
+  const bothMove = E.legalMoves(both).find((m) => m.tokenId === 'p0t1');
+  assert.equal(bothMove.captures.length, 2);
+  assert.equal(E.describeMove(both, bothMove), `captures 2 tokens on cell ${PLAIN_CELL}`);
+});
+
+test('describeMove is pure and total: every legal move of a played-out game gets a label', () => {
+  let s = newGame({ seed: 4242 });
+  const pick = E.makeRng(99);
+  const kinds = new Set();
+  for (let step = 0; step < 4000 && s.phase !== 'over'; step++) {
+    if (s.phase === 'roll') { s = E.rollDice(s).state; continue; }
+    const moves = E.legalMoves(s);
+    if (moves.length === 0) { s = E.passTurn(s).state; continue; }
+    const before = snap(s);
+    for (const m of moves) {
+      const text = E.describeMove(s, m);
+      assert.equal(typeof text, 'string');
+      assert.ok(text.length > 0 && text.length < 60, `bad label ${JSON.stringify(text)}`);
+      kinds.add(m.kind);
+    }
+    assert.equal(snap(s), before, 'describeMove mutated the state');
+    const m = moves[Math.floor(pick() * moves.length)];
+    s = E.applyMove(s, m.tokenId).state;
+  }
+  // a real game exercises every branch the picker can show
+  assert.deepEqual([...kinds].sort(), ['advance', 'enterHome', 'exit', 'goal']);
+  assert.equal(E.describeMove(s, null), '');
+});
+
+test('a seeded game replays identically, so wall-clock pace cannot change it', () => {
+  // The speed control scales setTimeout and the animation clock only. This is the
+  // engine half of that promise: nothing in a transition reads a wall clock, so the
+  // same seed and the same choices produce the same state every time, at any pace.
+  const replay = (seed) => {
+    let s = newGame({ seed });
+    const pick = E.makeRng(seed ^ 0x9e3779b9);
+    const trace = [];
+    for (let step = 0; step < 6000 && s.phase !== 'over'; step++) {
+      if (s.phase === 'roll') {
+        const rolled = E.rollDice(s);
+        s = rolled.state;
+        trace.push(`r${rolled.roll}`);
+        continue;
+      }
+      const moves = E.legalMoves(s);
+      if (moves.length === 0) { s = E.passTurn(s).state; trace.push('pass'); continue; }
+      const m = moves[Math.floor(pick() * moves.length)];
+      trace.push(`${m.tokenId}:${m.from}->${m.to}`);
+      s = E.applyMove(s, m.tokenId).state;
+    }
+    return { trace: trace.join('|'), final: E.serialize(s) };
+  };
+  const a = replay(777);
+  const b = replay(777);
+  assert.equal(a.trace, b.trace);
+  assert.equal(a.final, b.final);
+  assert.notEqual(a.trace, replay(778).trace);
+});
+
 test('the ring walk really is 65 cells long for every player', () => {
   for (let p = 0; p < PLAYERS; p++) {
     const seen = new Set();

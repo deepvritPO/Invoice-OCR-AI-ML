@@ -369,6 +369,51 @@ test('the goal wedge never overlaps a ring or home cell', () => {
   }
 });
 
+test('TOKEN_HIT_R gives a tap target bigger than the disc but inside the cell pitch', () => {
+  // The whole point of the hit area: it must be meaningfully larger than what is
+  // painted. The visible disc is 0.36 * cell (render.js).
+  const discR = G.layout.cell * 0.36;
+  assert.ok(G.TOKEN_HIT_R > discR * 1.3,
+    `hit radius ${G.TOKEN_HIT_R} is barely bigger than the disc ${discR.toFixed(2)}`);
+  assert.equal(G.layout.tokenHitR, G.TOKEN_HIT_R, 'layout must expose the same value');
+
+  // ...and it must not reach into a neighbouring cell, or a dense corner of the
+  // board mis-taps. The bound is half the closest distance between two DISTINCT
+  // cells, re-derived here from `layout` rather than copied from geometry.js.
+  const cells = allCells();
+  let closest = Infinity;
+  let pair = null;
+  for (let i = 0; i < cells.length; i++) {
+    for (let j = i + 1; j < cells.length; j++) {
+      const d = dist(cells[i], cells[j]);
+      if (d < closest) { closest = d; pair = [cells[i].id, cells[j].id]; }
+    }
+  }
+  assert.ok(G.TOKEN_HIT_R <= closest / 2,
+    `hit radius ${G.TOKEN_HIT_R} overlaps ${pair && pair.join(' / ')} (${closest.toFixed(2)} apart)`);
+});
+
+test('no two cells hit areas overlap, base slots included', () => {
+  // Every anchor a token can occupy on a cell or in a base, at the scale the
+  // renderer draws it there. Goal slots are excluded on purpose: those four spots
+  // share one wedge, they are not neighbouring cells, and a token parked at the
+  // goal can never be played — render.js shrinks its target back to the disc.
+  const anchors = allCells().map((c) => ({ ...c, r: G.TOKEN_HIT_R }));
+  for (let p = 0; p < G.PLAYERS; p++) {
+    for (let slot = 0; slot < 4; slot++) {
+      const { x, y } = G.baseSlot(p, slot);
+      anchors.push({ id: `base${p}.${slot}`, x, y, r: G.TOKEN_HIT_R });
+    }
+  }
+  for (let i = 0; i < anchors.length; i++) {
+    for (let j = i + 1; j < anchors.length; j++) {
+      const gap = dist(anchors[i], anchors[j]) - anchors[i].r - anchors[j].r;
+      assert.ok(gap >= 0,
+        `${anchors[i].id} and ${anchors[j].id} overlap by ${(-gap).toFixed(2)} board units`);
+    }
+  }
+});
+
 test('four parked tokens fit inside a goal wedge', () => {
   // render.js draws a goal token at tokenR = 0.36*cell with a 0.16*tokenR stroke, then
   // scales the group by GOAL_SCALE = 0.72 -> outer radius 0.28 * cell.

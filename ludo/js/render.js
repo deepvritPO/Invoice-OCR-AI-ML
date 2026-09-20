@@ -705,6 +705,20 @@ export function createRenderer(svgEl, opts = {}) {
     if (token) applyTokenA11y(node, player, token, tokenNumber(token));
   }
 
+  /**
+   * SVG has no z-index, so the only way to draw the moving token above the rest is to
+   * re-append its <g> to the end of the layer. Chrome implements that as remove +
+   * insert, which BLURS the node: every human move dropped focus on <body> about 80ms
+   * after ui.js had deliberately handed it to the token, and it stayed there for the
+   * whole bot lap (measured: single stretches of up to 14.8s), which made the board's
+   * Arrow/Home/End roving unreachable and broke SPEC 8. Carry the focus across.
+   */
+  function raiseToTop(group) {
+    const held = group.contains(document.activeElement);
+    layers.get('layer-tokens').appendChild(group);
+    if (held) group.focus({ preventScroll: true });
+  }
+
   function animateMove(event, state) {
     return serialise(() => {
       const node = tokens.get(event.tokenId);
@@ -723,7 +737,7 @@ export function createRenderer(svgEl, opts = {}) {
         return Promise.resolve();
       }
 
-      layers.get('layer-tokens').appendChild(node.group); // the mover draws above the rest
+      raiseToTop(node.group); // the mover draws above the rest
       node.group.classList.add('token--moving');
 
       // A long jump (base -> start, or into the goal) is given proportionally more time.
@@ -800,7 +814,7 @@ export function createRenderer(svgEl, opts = {}) {
         return Promise.resolve();
       }
 
-      layers.get('layer-tokens').appendChild(node.group);
+      raiseToTop(node.group);
       node.group.classList.add('token--captured');
 
       // Quadratic arc whose control point is pushed away from the board centre.

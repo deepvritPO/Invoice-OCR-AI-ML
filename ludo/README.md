@@ -176,17 +176,19 @@ single byte from outside the `ludo/` directory.
 node --test "ludo/test/*.test.mjs"
 ```
 
-61 tests, no dependencies, importing the real modules by relative path. They
+67 tests, no dependencies, importing the real modules by relative path. They
 cover the board geometry (ring closure and the 64 → 0 wrap, cell spacing,
 viewBox containment, the safe-cell set, every progress regime for all five
 players, the six-row arm grid with no empty middle-column slot, the innermost
 home cell docking the goal pentagon's vertex, no goal-wedge/cell overlap, and
-four tokens fitting inside a goal wedge), the seat palette (deuteranopia and
+four tokens fitting inside a goal wedge, and the token tap-target radius being
+bigger than the disc while never overlapping a neighbouring cell's), the seat palette (deuteranopia and
 protanopia separation in both themes, 4.5:1 ink contrast, and exact agreement
 with `css/styles.css`), the rules engine (exit on six, exact roll to goal, capture and
 no-capture-on-safe, blocks landing and passing, three-sixes forfeit, extra
 turns, rank order, game over, immutability, serialize round-trip, and seeded
-full games that must terminate), and the bot (picks a supplied move, prefers a
+full games that must terminate, `describeMove`'s label for every move kind, and
+an identical replay from one seed), and the bot (picks a supplied move, prefers a
 goal, prefers a capture, deterministic, never throws).
 
 > `node --test ludo/test` — passing the *directory* — is the documented Node
@@ -206,8 +208,17 @@ starts `serve.mjs` on a free port itself, prints a per-check pass/fail summary
 and exits non-zero on failure. It covers the roving tabindex and arrow-key
 roving, token roles and `aria-disabled`, the spoken reason for every rejected
 pick, results-dialog focus, and four kinds of corrupt save being discarded
-without a dead screen. It needs Playwright and Chromium installed **globally**;
-the app itself stays dependency-free and no-build.
+without a dead screen.
+
+It also covers the touch surface: that the picker's buttons are labelled "Token N
+<what the move does>" and sized past 44px, that the board, the digits and the
+picker agree on one pick and cancel each other, that the speed control persists
+and does not change a seeded game, and that a whole human turn can be played by
+`tap()` alone on `devices['iPhone 12']` and `devices['Pixel 5']` with no
+horizontal scroll and no console errors. 95 checks in all.
+
+It needs Playwright and Chromium installed **globally**; the app itself stays
+dependency-free and no-build.
 
 ---
 
@@ -239,11 +250,13 @@ the UI animates.
 | --- | --- |
 | **Space** or **Enter** | Roll the dice (or confirm the focused token when one is selected) |
 | **1 … 4** | Play that token of the player to move (`1 … 2` or `1 … 3` in a shorter game) |
+| **The move picker** | One button per legal move, under the dice. Click, tap or press Enter on it to play that move; hovering or focusing it highlights the token on the board |
 | **Click / tap** a token | Play that token — movable tokens are highlighted |
-| **Click** the dice button | Roll |
+| **Click / tap** the dice button | Roll |
 | **Tab** / **Shift-Tab** | Move between the board, the dice and the panel controls. The board holds a single tab stop (the last token you touched); during a pick every *movable* token is a stop |
 | **Arrow keys**, **Home**, **End** | Move focus from token to token on the board (Home/End jump to the first/last) |
 | **Esc** | Close the results dialog |
+| **Speed** (Normal / Fast / Instant) | Panel control, remembered across sessions. Timing only — the same seed replays the same game at every setting |
 
 Keys are ignored while a text input or select has focus, and a focused button
 keeps its own Space/Enter. Everything else is answered: a polite `aria-live`
@@ -253,7 +266,75 @@ bot.", "There is no token 5 — press 1–4." — by key, by click and by tap al
 
 The board uses a roving tabindex, so Tab enters it once rather than walking all
 twenty tokens; arrows move within it. When a pick opens, focus moves to the first
-movable token, and after the move it returns to the dice.
+movable token; it stays on the token that was played while the move animates, and
+comes back to the dice when it is your turn to roll again. The app never drops it
+on `<body>` (tabbing off the end of the document is still the browser's business) — SVG has no z-index, so raising the moving token means re-appending its
+`<g>`, which Chrome treats as a remove plus an insert and which used to blur it
+(measured: single stretches of up to 14.8s with no focus anywhere, and therefore
+no arrow-key roving). `render.js` now carries focus across that re-parent, and
+disabling the dice at roll time hands focus to the board instead of dropping it.
+
+The picker, the board tokens and the number keys are three routes to the *same*
+pick. Whichever fires first plays the move and cleanly cancels the other two: the
+picker empties, the highlights clear, and a late key or tap is answered with a
+reason instead of moving a second token.
+
+### On a phone
+
+The board is the display; the picker is the input. At 390 CSS px a board cell is
+about 16px across, so a token can never be a 24px target however the board is
+scaled — a 24px cell would need a board 520px wide. So:
+
+- **Every legal move gets its own button**, 48px tall and the full width of the
+  panel, captioned with what the move actually does: *"Token 2 · captures Priya
+  on cell 31"*, *"Token 4 · leaves base"*, *"Token 1 · home!"*, *"Token 3 ·
+  enters the home run · 4 to go"*, *"Token 1 · 12 → 17 · safe cell"*.
+- **Tokens still take taps.** Each one carries an invisible hit circle sized to
+  the board cell rather than to the 12px disc that is painted — 17.1 CSS px on an
+  iPhone 12, 17.3 on a Pixel 5, up from 11.8. The circles are capped at half the
+  distance between two cells, so a tap in a crowded corner cannot land on the
+  wrong cell.
+- **The picker is never buried, and neither is the board.** Opening the picker
+  scrolls the page by at most the board's own *headroom* — the empty space above
+  it — so the board's top edge never leaves the screen. (It used to spend a third
+  of the board on top of that, which scrolled 33% of the board off a 320×480
+  phone.) Measured with the picker open, no Playwright auto-scroll involved:
+
+  | viewport | board | picker |
+  | --- | --- | --- |
+  | iPhone 12 · 390×664 | 71–430, 100% visible | 442–654, 100% |
+  | Pixel 5 · 393×727 | 107–469, 100% | 505–717, 100% |
+  | 360×560 | 28–359, 100% | 372–550, 100% |
+  | 320×480 | 0–295, 100% | 307–485, 97% |
+
+  Under 620px of height the card heading drops to screen readers only and the
+  padding tightens, which is what buys the small phones that last row.
+- **Landscape is its own layout.** A phone held sideways is short and wide, not
+  tall and narrow: stacking a 265px board on a 270px picker needed 535px of a
+  340px viewport while 485px of side margin sat empty, and the best you could see
+  at any scroll position was 60% of the board plus 61% of the picker. Below 520px
+  of height the panel moves *beside* the board and the board becomes
+  `position: sticky`, so it cannot be scrolled away. Both are now 100% visible at
+  once on iPhone 12 landscape (750×340), Pixel 5 landscape (802×293) and iPhone
+  SE landscape (568×320).
+- **A refused tap is visible, not just spoken.** Tapping another seat's token
+  writes the reason into the picker itself — above the buttons, where the thumb
+  already is — as well as into `#turn-detail` and the live region. The panel
+  message alone was invisible on a phone: the sticky picker sits on top of it.
+- **The roll hint steps aside during a pick.** "Tap the dice, then tap one of the
+  move buttons that appear" is guidance for the roll phase, and the dice is
+  disabled by then; hiding it shortens the turn card by a line, which is what
+  stops the sticky picker clipping the very hint it answers.
+- **The notch is respected.** `viewport-fit=cover` is kept, but `.topbar` and
+  `main` now pad with `max(…, env(safe-area-inset-*))` on all four sides, not
+  just the bottom — a landscape iPhone has 47px bands on the left and right, and
+  the theme buttons used to sit inside one. (Honest caveat: headless Chromium
+  reports every inset as 0px, so this is a code-level fix measured against
+  Apple's published inset values, not a screenshot of the failure.)
+- **The copy tells the truth.** Under `(hover: none) and (pointer: coarse)` the
+  dice hint reads "Tap the dice, then tap one of the move buttons that appear —
+  or tap a token on the board", with no mention of Space or the 1–4 keys that a
+  phone does not have.
 
 ## Settings
 
@@ -273,10 +354,22 @@ Everything below lives on the setup screen and is applied when you press
 - **Theme** — Auto / Light / Dark in the header, remembered in `localStorage`.
   Auto follows `prefers-color-scheme`.
 
+And one setting lives on the game screen, because it is something you change
+mid-game:
+
+- **Speed** — Normal / Fast / Instant, roughly 1x, 3x and no deliberate delay at
+  all. It scales the bots' think-time, the pause before a turn passes and the
+  animation clock; a four-token five-player game is about 1200 moves, which is
+  three quarters of an hour at 1x. It is remembered in `localStorage` beside the
+  theme. It changes **timing only** — no game logic and no dice — so the same
+  seed replays the same game at every setting, which the browser check asserts by
+  running one seed at Normal and at Instant and comparing the engine log.
+
 The game in progress is saved to `localStorage` after each move, and the setup
 screen offers **Resume game** when a saved game is found. The move log inside the
-state keeps only its last 200 entries, so the save stays a few kilobytes however
-long the game runs. Every storage access is wrapped in `try/catch`, so
+state keeps only its last 200 entries, so the save stays around 16 KB however
+long the game runs — measured across five complete five-bot games (1707–2559
+moves), peak payload 15 958–16 056 bytes, reached early and then flat. Every storage access is wrapped in `try/catch`, so
 private-mode browsers simply lose persistence rather than breaking — and a save
 that is corrupt or from an incompatible build is discarded with a visible notice
 instead of leaving a dead screen.

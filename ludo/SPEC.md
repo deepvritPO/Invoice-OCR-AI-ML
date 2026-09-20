@@ -64,6 +64,11 @@ export const COLORS;          // 5 entries: {id, name, hex, dark, light, text}
                               // and protanopia, and `text` clears 4.5:1 on both the
                               // light and the dark variant of its own seat.
 export const SAFE_CELLS;      // Set<number>
+export const TOKEN_HIT_R;     // radius of a token's invisible tap target, in board
+                              // units. Must stay <= half the smallest distance
+                              // between two distinct cells (48.76 units), or two
+                              // neighbouring cells' targets overlap and a crowded
+                              // corner of the board mis-taps. Also on `layout`.
 export function startIndex(p);        // number
 export function entryIndex(p);        // number
 export function isSafe(ringIndex);    // boolean
@@ -77,6 +82,7 @@ export const layout;                  // fully pre-computed, see below
 ```js
 {
   size: 1000, viewBox: '0 0 1000 1000', center: {x:500, y:500}, cell: 46,   // cell edge length
+  tokenHitR: 24,                                                            // = TOKEN_HIT_R
   ring: [ {index, x, y, rot, arm, safe, tip, startFor|null} x65 ],          // rot in degrees
   homes: [ [ {x,y,rot,step} x5 ] x5 ],                                      // homes[p][0..4]
   bases: [ {p, x, y, r, slots:[{x,y} x4], gateFrom:{x,y}, gateTo:{x,y}} x5 ],
@@ -110,6 +116,7 @@ export function legalMoves(state);             // -> Move[]   (phase 'move'; [] 
 export function applyMove(state, tokenId);     // -> {state, events}
 export function passTurn(state);               // -> {state, events} when legalMoves is empty
 export function standings(state);              // -> [{playerId, rank, home, progress}]
+export function describeMove(state, move);     // -> short phrase: what this move DOES
 export function serialize(state) / deserialize(str);
 ```
 
@@ -172,6 +179,12 @@ Rule details (implement exactly):
    remains (that player takes the last rank).
 10. `applyMove` must never mutate the input state (clone first). Same for `rollDice`/`passTurn`.
 
+`describeMove(state, move)` returns the phrase the move picker puts on a button —
+`'leaves base'`, `'captures Priya on cell 31'`, `'enters the home run · 4 to go'`,
+`'home!'`, `'12 → 17 · safe cell'`. Pure, and ordered by consequence rather than by
+the shape of the Move: reaching the goal outranks a capture, a capture outranks where
+the token came from. One fact per button, so it has to be the deciding one.
+
 `events` entries (consumed by the UI for animation, in order):
 ```js
 {type:'move', playerId, tokenId, from, to, path:[t...]}   // path = every t stepped through
@@ -208,6 +221,8 @@ export function createRenderer(svgEl, opts);
   animateMove(event, state) -> Promise,         // steps a token along event.path
   animateCapture(event, state) -> Promise,
   pulseTokens(tokenIds), clearPulse(),
+  highlightToken(tokenId|null),                 // decorative "point at this one"
+  setSpeed(factor),                             // 1 = Normal, 1/3 = Fast, 0 = Instant
   cancelAnimations(),                           // see below
   setDice(value, {rolling}), shakeDice() -> Promise,
   destroy()
@@ -222,6 +237,19 @@ the same as `destroy()`: the renderer stays usable afterwards.
 this browser's user plays, or `null`) drive the board's accessibility model — see §8.
 Tokens are `<g class="token" data-token-id>` elements translated to `cellCenter`. Movement
 animation steps cell-to-cell (~90ms per cell, honouring `prefers-reduced-motion` by jumping).
+
+Every token carries a `<circle class="token-hit" r=TOKEN_HIT_R fill="transparent">` drawn
+behind the disc, with `pointer-events: all`. It is authored in board units, so it scales
+with the viewBox and with the group's own scale when tokens stack; at the goal it shrinks
+back to the disc, because four tokens share one wedge there. The disc alone is ~12 CSS px
+on a 390px phone; the hit circle makes it ~17, the width of a cell.
+
+`setSpeed(factor)` scales the animation clock and nothing else. No drawing or state branch
+reads it, so a game replays identically at any speed; 0 makes every animation settle on its
+final frame at once, exactly as `prefers-reduced-motion` does.
+
+`highlightToken(id)` toggles `.token--preview` on one token. It touches no label, role or
+tab stop — the move picker uses it to point at the token a button would move.
 All colours come from CSS custom properties `--p0..--p4` so themes work.
 
 render.js may set `fill-opacity`/`stroke-opacity` presentation attributes as a stand-alone
@@ -238,7 +266,29 @@ for ink on a seat colour; styles.css defines `--p-ink` per `.pN`.
   banner alike — agrees its verb with the seat name ("Your turn", "You have no legal
   move"), and `describeChoice`'s third-person phrase is converted to the base form.
 * Game screen: SVG board, 5 player cards (colour, name, tokens home, turn indicator),
-  dice button (Space / click), move log, New game, and a rules `<details>` panel.
+  dice button (Space / click), the **move picker**, move log, a **speed control**,
+  New game, and a rules `<details>` panel.
+* **Move picker** (`#move-picker`, directly under the dice card): while a human is to
+  move and `legalMoves()` is non-empty, one button per legal move — token number plus
+  colour swatch plus `describeMove()`. Minimum 44px tall, full panel width, in the tab
+  order, each button named "Token N <what it does>" (the swatch digit and the separator
+  are `aria-hidden`). Hover or focus calls `renderer.highlightToken`; pressing plays the
+  move. It is the primary input on a phone, where a board token is only ~17 CSS px.
+  A single forced move still renders — quietly, captioned "Only one move — playing it."
+  — and auto-plays after a beat through the same route.
+* **Three routes, one pick.** The picker buttons, the board tokens and the 1-4 keys all
+  call one `pickToken()`, which resolves the turn loop's single promise; whichever fires
+  first clears the other two. The picker is emptied the moment the pick resolves, the
+  turn passes or the game is torn down, and focus moves to the chosen token so it is
+  never dropped on `<body>`.
+* **Speed control** (`#speed-control`): Normal / Fast / Instant = 1x / 3x / no deliberate
+  delay. It scales the bot think-time, the pass pause, the auto-move beat and
+  `renderer.setSpeed()`. It must not touch game logic or the RNG: the same seed replays
+  the same game at every setting. Persisted in `localStorage` beside the theme, in
+  try/catch, under the key published as `window.LUDO_SPEED_KEY`.
+* **Honest copy on touch.** Under `(hover: none) and (pointer: coarse)` the dice hint and
+  the pick prompt name tapping, not clicking, Space or the 1-4 keys — there is no
+  keyboard there. Queried live and re-rendered on `change`, never cached.
 * Flow: roll -> if no moves, toast + auto pass after 700ms -> else highlight movable tokens;
   human clicks a token (or presses 1..4), bot auto-plays after ~550ms.
 * Keyboard: Space/Enter rolls, a digit selects that token, Esc closes dialogs — see §8.
@@ -246,7 +296,25 @@ for ink on a seat colour; styles.css defines `--p-ink` per `.pN`.
   every turn, and every *rejected* pick is answered with the reason it was rejected.
 * The dice hint names the real token range (`1-2`, `1-3` or `1-4`), matching the pick
   prompt; neither is hard-coded.
-* Responsive: board scales to `min(92vw, 78vh)`; panels stack under 900px. Dark mode via
+* **A refused pick must be visible, not only spoken.** On a phone the sticky picker sits
+  on top of `#turn-detail`, so a reason written only there reaches the screen reader and
+  nobody else. `reject()` mirrors it into `#move-picker-note`, above the buttons, and
+  clears it on the next successful pick or re-render.
+* Responsive: board scales to `min(92vw, 78vh)`; panels stack under 900px. Below 900px
+  the picker is `position: sticky; bottom: …` so it cannot sit under the fold, and
+  opening it scrolls the page by **at most the board's own headroom** — the board's top
+  edge never leaves the screen to reveal it — unless the board is itself `sticky`, in
+  which case there is nothing left to protect and the cap lifts. Under 620px of height
+  the picker's heading goes screen-reader-only and its padding tightens, so a 320x480
+  phone still gets the whole card.
+* **Landscape is a separate layout, keyed on height.** Under `(max-width: 899px) and
+  (min-width: 560px) and (max-height: 520px)` the panel moves beside the board and the
+  board becomes `position: sticky`. Width alone is the wrong key: a sideways phone is
+  short and wide, and the portrait stack needs 535px of a 340px viewport while ~485px of
+  side margin sits unused.
+* **`viewport-fit=cover` implies honouring all four safe-area insets**, not just the
+  bottom one: `.topbar` and `main` pad with `max(…, env(safe-area-inset-*))`.
+  Dark mode via
   `prefers-color-scheme` plus a manual toggle persisted in `localStorage` (wrapped in try/catch).
 * Game state persisted to `localStorage` after each move; offer "Resume game" if present.
 
@@ -256,12 +324,29 @@ Note: the bare directory form `node --test ludo/test` fails on Node 22.x (it tri
 `require` the directory). Use the glob form above.
 
 Cover: ring closure & geometry adjacency, start/entry offsets, safe-cell set, progress mapping,
+the tap-target bound (`TOKEN_HIT_R` bigger than the disc, no two cells' targets overlapping),
+`describeMove` for every move kind, an identical seeded replay,
 the six-row arm grid (no empty middle-column slot, the innermost home cell docking the goal
 pentagon's vertex, no goal-wedge/cell overlap, four tokens fitting a wedge), the seat palette
 (deuteranopia + protanopia separation in both themes, 4.5:1 ink, exact agreement with
 `css/styles.css`), exit-on-six only, exact-roll-to-goal, capture + no-capture-on-safe,
 blocks (land + pass), three-sixes forfeit, extra-turn cases, finish/rank ordering, full seeded
 5-bot game reaching `phase:'over'` within a sane move budget, and state immutability.
+
+It also drives the new surface: labelled picker buttons at a real target size, the three
+pick routes agreeing and cancelling each other, the speed control persisting, an identical
+engine log at Normal and at Instant, and a full human turn played by `tap()` alone on
+`devices['iPhone 12']` and `devices['Pixel 5']`.
+
+It also guards the regressions this surface can cause: `document.activeElement` sampled
+every 20ms across a human move **and the bot lap after it, with motion NOT reduced**
+(`openPage(..., { motion: true })` — the reduced-motion path returns before the re-parent
+that causes the bug, so the check would otherwise test nothing); a refused tap's reason
+visible and un-covered inside the picker on iPhone 12 and iPhone SE; the board's top edge
+still on screen at 320x480 and 360x560 with the picker open (rolled with the keyboard,
+because `tap()`/`click()` scroll the target into view themselves and would forge the
+number); two columns and 100%/100% visibility in landscape; and a no-op speed press
+staying silent while Instant keeps the bots out of the live region.
 
 `test/browser-a11y.mjs` is a separate, manual smoke check — it drives a real Chromium through
 Playwright and is deliberately **not** matched by the `*.test.mjs` glob. Run it with
@@ -282,8 +367,21 @@ Chromium installed globally — the app itself stays dependency-free and no-buil
   every other seat's tokens are `role="img"`. `aria-disabled="true"` marks the user's own
   tokens that cannot be played this turn — they stay arrow-reachable, and CSS dims them.
 * **Labels** carry movability, e.g. `You token 3, in base, cannot move this turn`.
-* **Focus never parks on `<body>`.** Disabling the dice at roll time blurs it, so the pick
-  phase focuses the first movable token; after the move focus returns to the dice.
+* **Focus never parks on `<body>` — at any speed, during animations included.** Three
+  things are required for that, and all three are load-bearing:
+  1. Disabling the dice blurs it, so `setBusy()` recovers focus to the board's current
+     tab stop the moment it disables a dice that had focus (the ~580ms of dice tumble
+     before the picker opens used to be spent on `<body>`).
+  2. The pick phase focuses the first movable token, and when the picker is emptied the
+     token that was chosen takes focus.
+  3. SVG has no z-index, so `render.js` raises the moving token by re-appending its `<g>`.
+     Chrome implements that as remove + insert and blurs the node; `raiseToTop()` carries
+     focus across it. Without this the board had no focus for the whole bot lap —
+     measured single stretches of up to 14.8s — and Arrow/Home/End were unreachable
+     because `handleKeyDown` reads the token id off `ev.target`.
+  `playEvents()` calls `recoverFocus()` after every animation batch as a net, for cases
+  like a bot capturing the token the player had focused. It only ever acts on focus that
+  is already gone, so it cannot take focus from a live control.
 * **Every rejected input speaks.** Any digit `0-9`, from any focus (dice, buttons, the log
   `<summary>`, `<body>`), and any click or tap on a token — including while a bot plays —
   routes through `rejectReason()`, which writes both `#turn-detail` and the live region and
@@ -292,5 +390,10 @@ Chromium installed globally — the app itself stays dependency-free and no-buil
   on the next frame so a screen reader speaks it again. Consequently the board must stay
   pointer-interactive while `body.is-busy`; the busy state is enforced in JS, not by
   `pointer-events: none`.
+* **The polite live region has to be drainable.** Re-pressing an already-pressed speed
+  button changes nothing and must therefore say nothing, and at Instant — where a whole
+  bot lap lands in under a second — the bots' running commentary is dropped, because a
+  polite queue would still be narrating a board several turns stale. The human's own
+  prompts always speak, and `#log-list` keeps every move either way.
 * A screen-reader-only `<h1>` names the game screen, and dismissing the results dialog
   restores focus to the control that is still on screen.

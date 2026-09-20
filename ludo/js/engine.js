@@ -384,11 +384,14 @@ export function describeMove(state, move) {
     return `captures ${move.captures.length} tokens${where}`;
   }
 
-  const stepsLeft = HOME_STEP - move.to;
-  const toGo = `${stepsLeft} step${stepsLeft === 1 ? '' : 's'} from home`;
-  if (move.kind === 'enterHome') return `enters the home run · ${toGo}`;
+  const toGo = `${HOME_STEP - move.to} to go`;
   if (move.kind === 'exit') return 'leaves base';
-  if (move.toCell && move.toCell.kind === 'home') return `up the home run · ${toGo}`;
+  // buildMove() calls every landing at t >= RING 'enterHome', including a step taken
+  // by a token that was already in the column. Only the first one is news.
+  if (move.kind === 'enterHome') {
+    const already = move.fromCell && move.fromCell.kind === 'home';
+    return `${already ? 'up' : 'enters'} the home run · ${toGo}`;
+  }
 
   const safe = move.toCell && move.toCell.kind === 'ring' && isSafe(move.toCell.index);
   return `${move.from} → ${move.to}${safe ? ' · safe cell' : ''}`;
