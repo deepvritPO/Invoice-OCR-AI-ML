@@ -86,6 +86,19 @@ const BASE_R = 7.8 * CELL; // distance of the base plate centre from the board c
 const BASE_PLATE_R = 2.0 * CELL; // radius of the base plate
 const BASE_SLOT_OFF = 0.44 * BASE_PLATE_R; // 2x2 parking grid inside the plate
 
+/**
+ * Radius of a token's invisible tap target, in board units.
+ *
+ * The visible disc is only 0.36 * CELL across the radius (16.56 units), which on a
+ * 390px-wide phone is a ~12 CSS px circle — far below any usable touch target. The
+ * hit area is sized to the board cell instead, and capped by the geometry: the two
+ * closest DISTINCT cells on the board (two neighbouring ring cells, and a ring cell
+ * beside a home cell) sit 48.76 units apart, so a radius above 24.38 would make two
+ * neighbouring cells' targets overlap and dense areas mis-tap. 24 leaves a 0.76-unit
+ * gutter — see test/geometry.test.mjs, which re-derives the bound from `layout`.
+ */
+export const TOKEN_HIT_R = 24;
+
 // ---------------------------------------------------------------------------
 // Frame helpers: every piece of the board is authored in an arm-local frame
 // (u = outward along the arm axis, v = perpendicular) and then rotated + translated.
@@ -376,6 +389,7 @@ export const layout = Object.freeze({
   viewBox: `0 0 ${SIZE} ${SIZE}`,
   center: { x: CX, y: CY },
   cell: CELL,
+  tokenHitR: TOKEN_HIT_R,
   ring,
   homes,
   bases,

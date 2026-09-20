@@ -351,6 +351,49 @@ export function legalMoves(state) {
  * Applying a move
  * ------------------------------------------------------------------ */
 
+/** Seat names behind a list of victim token ids, in board order, without repeats. */
+function victimNames(state, tokenIds) {
+  const seats = new Set();
+  for (const id of tokenIds) {
+    const owner = (state.players || []).find((p) => p.tokens.some((t) => t.id === id));
+    if (owner) seats.add(owner.name);
+  }
+  return [...seats];
+}
+
+/**
+ * What a move actually DOES, as a short phrase — the label on a move-picker button
+ * and, where a caller wants it, a log line. Pure: everything is read off the Move
+ * the engine already returned, plus the state it came from (needed only to name a
+ * capture's victim).
+ *
+ * The clauses are ordered by consequence, not by the shape of the Move: a move that
+ * both enters the home run and reaches the goal says "home!", and a capture outranks
+ * where the token came from. Only one fact fits on a button, so it has to be the one
+ * that decides whether the player picks this move.
+ */
+export function describeMove(state, move) {
+  if (!move) return '';
+  if (move.kind === 'goal' || move.to >= HOME_STEP) return 'home!';
+
+  if (move.captures && move.captures.length > 0) {
+    const where = move.toCell && move.toCell.kind === 'ring' ? ` on cell ${move.toCell.index}` : '';
+    const names = victimNames(state, move.captures);
+    if (names.length === 1 && move.captures.length === 1) return `captures ${names[0]}${where}`;
+    if (names.length === 1) return `captures ${move.captures.length} of ${names[0]}'s${where}`;
+    return `captures ${move.captures.length} tokens${where}`;
+  }
+
+  const stepsLeft = HOME_STEP - move.to;
+  const toGo = `${stepsLeft} step${stepsLeft === 1 ? '' : 's'} from home`;
+  if (move.kind === 'enterHome') return `enters the home run · ${toGo}`;
+  if (move.kind === 'exit') return 'leaves base';
+  if (move.toCell && move.toCell.kind === 'home') return `up the home run · ${toGo}`;
+
+  const safe = move.toCell && move.toCell.kind === 'ring' && isSafe(move.toCell.index);
+  return `${move.from} → ${move.to}${safe ? ' · safe cell' : ''}`;
+}
+
 function moveText(player, move) {
   switch (move.kind) {
     case 'exit':

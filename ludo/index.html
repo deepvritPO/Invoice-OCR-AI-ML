@@ -12,6 +12,7 @@
   // This runs long before js/ui.js loads, so the key literal lives here and is published
   // on window for ui.js to reuse — one source of truth, no chance of the two drifting.
   window.LUDO_THEME_KEY = 'pentagon-ludo:v1:theme';
+  window.LUDO_SPEED_KEY = 'pentagon-ludo:v1:speed';
   try {
     var savedTheme = localStorage.getItem(window.LUDO_THEME_KEY);
     if (savedTheme === 'light' || savedTheme === 'dark') {
@@ -258,6 +259,15 @@
         </div>
       </div>
 
+      <!-- The board's tap targets are ~17 CSS px on a phone; these buttons are the
+           primary way to play there, and the screen-reader-friendly way everywhere.
+           ui.js fills and empties it — it is hidden whenever there is nothing to pick. -->
+      <section id="move-picker" class="move-picker" aria-labelledby="move-picker-title" hidden>
+        <h2 id="move-picker-title" class="card-title">Your move</h2>
+        <div id="move-picker-list" class="move-list"></div>
+        <p id="move-picker-note" class="hint move-picker-note" hidden></p>
+      </section>
+
       <ul id="player-cards" class="player-cards">
         <li class="player-card p0" id="card-0" data-player="0">
           <span class="card-dot" aria-hidden="true"></span>
@@ -300,6 +310,15 @@
         <h2 class="card-title">Move log</h2>
         <ol id="log-list" class="log" aria-live="polite" aria-relevant="additions"></ol>
       </section>
+
+      <div class="pace-card">
+        <span class="pace-label" id="speed-label">Speed</span>
+        <div id="speed-control" class="pace-toggle" role="group" aria-labelledby="speed-label">
+          <button type="button" class="pace-btn" data-speed="normal" aria-pressed="true">Normal</button>
+          <button type="button" class="pace-btn" data-speed="fast" aria-pressed="false">Fast</button>
+          <button type="button" class="pace-btn" data-speed="instant" aria-pressed="false">Instant</button>
+        </div>
+      </div>
 
       <div class="panel-actions">
         <button type="button" id="btn-rematch" class="btn btn-ghost">Rematch</button>

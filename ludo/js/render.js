@@ -10,7 +10,7 @@
  * Presentation attributes lose to any CSS rule, so css/styles.css stays in charge.
  */
 
-import { PLAYERS, layout, cellCenter, baseSlot, progressToCell } from './geometry.js';
+import { PLAYERS, TOKEN_HIT_R, layout, cellCenter, baseSlot, progressToCell } from './geometry.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -20,6 +20,14 @@ const HOP_MS = 90; // time for one cell-to-cell hop
 const CAPTURE_MS = 540;
 const RIPPLE_MS = 520;
 const DICE_TUMBLE_MS = 560;
+
+/**
+ * Pace multiplier applied to every duration above. setSpeed() scales the clock and
+ * nothing else — no branch below reads it, so an animation cannot change which cells
+ * a token visits, and 0 ("Instant") simply makes animate() jump to its final frame.
+ */
+const MIN_SPEED = 0;
+const MAX_SPEED = 1;
 const DICE_FRAMES = [3, 6, 2, 5, 1, 4, 6, 2]; // deterministic tumble, no Math.random
 
 /** Pip positions as [column, row] on a 3x3 grid, classic die faces. */
@@ -126,6 +134,10 @@ export function createRenderer(svgEl, opts = {}) {
 
   /** The most recent state handed to sync(); label refreshes read it. */
   let lastState = null;
+
+  /** Pace multiplier: 1 = Normal, 1/3 = Fast, 0 = Instant. See setSpeed(). */
+  let speed = 1;
+  const dur = (ms) => ms * speed;
 
   let animChain = Promise.resolve();
   let diceChain = Promise.resolve();
@@ -368,6 +380,15 @@ export function createRenderer(svgEl, opts = {}) {
       tabindex: -1,
       role: 'img',
     }, layers.get('layer-tokens'));
+    // Invisible tap target, drawn first so it sits behind the disc. The visible disc
+    // is only ~12 CSS px across on a phone; this circle is sized in BOARD units, so it
+    // scales with the viewBox and with the group's own scale when tokens stack.
+    // pointer-events:all is explicit — a `fill: none` from a future stylesheet rule
+    // would otherwise make the whole target untappable.
+    el('circle', {
+      class: 'token-hit', cx: 0, cy: 0, r: r2(TOKEN_HIT_R),
+      fill: 'transparent', 'pointer-events': 'all',
+    }, group);
     el('circle', {
       class: `token-disc p${player.id}`, cx: 0, cy: 0, r: r2(tokenR),
       fill: `var(--p${player.id})`, stroke: 'var(--p-ink, white)', 'stroke-opacity': 0.85,
@@ -383,7 +404,7 @@ export function createRenderer(svgEl, opts = {}) {
       'font-family': 'inherit', 'font-size': r2(tokenR * 0.95), 'font-weight': 700,
       fill: 'var(--p-ink, white)', 'pointer-events': 'none',
     }, group);
-    const node = { group, label };
+    const node = { group, label, hit: group.querySelector('.token-hit') };
     tokens.set(token.id, node);
     return node;
   }
@@ -574,6 +595,13 @@ export function createRenderer(svgEl, opts = {}) {
       const number = tokenNumber(token);
       if (node.label.textContent !== String(number)) node.label.textContent = String(number);
       node.group.setAttribute('transform', transformOf(entry.x, entry.y, entry.scale));
+      // Four tokens parked in one goal wedge sit 27.05 units apart — closer than any
+      // two cells — so at the goal the target shrinks back to the disc. Everywhere
+      // else the full cell-sized target applies, scaled with the group.
+      const hitR = r2(entry.at === 'goal' ? tokenR : TOKEN_HIT_R);
+      if (node.hit && node.hit.getAttribute('r') !== String(hitR)) {
+        node.hit.setAttribute('r', String(hitR));
+      }
       applyTokenA11y(node, player, token, number);
       const cl = node.group.classList;
       cl.toggle('token--selected', selected === token.id);
@@ -628,6 +656,28 @@ export function createRenderer(svgEl, opts = {}) {
     refreshTokenA11y();
   }
 
+  /**
+   * Point at one token without selecting it — the move picker's buttons call this on
+   * hover and on focus so the panel and the board name the same piece. Purely visual:
+   * it touches no label, role or tab stop, so it cannot disturb the pick.
+   */
+  function highlightToken(tokenId) {
+    for (const [id, node] of tokens) {
+      node.group.classList.toggle('token--preview', id === tokenId);
+    }
+  }
+
+  /**
+   * Scale every animation clock. 1 = Normal, 1/3 = Fast, 0 = Instant (no deliberate
+   * delay at all). Nothing but timing changes: the waypoints, the state and the RNG
+   * are untouched, so the same seed replays the same game at any speed.
+   */
+  function setSpeed(value) {
+    const n = Number(value);
+    speed = Number.isFinite(n) ? clamp(n, MIN_SPEED, MAX_SPEED) : 1;
+    return speed;
+  }
+
   // -------------------------------------------------------------------------
   // Animation
   // -------------------------------------------------------------------------
@@ -668,7 +718,7 @@ export function createRenderer(svgEl, opts = {}) {
         node.group.classList.remove('token--moving');
         relabel(node, state, event.playerId, event.tokenId);
       };
-      if (hops < 1 || reducedMotion()) {
+      if (hops < 1 || speed === 0 || reducedMotion()) {
         finish();
         return Promise.resolve();
       }
@@ -682,7 +732,7 @@ export function createRenderer(svgEl, opts = {}) {
       for (let i = 0; i < hops; i++) {
         const dx = points[i + 1].x - points[i].x;
         const dy = points[i + 1].y - points[i].y;
-        const ms = HOP_MS * clamp(Math.hypot(dx, dy) / (cell * 1.15), 1, 3);
+        const ms = dur(HOP_MS) * clamp(Math.hypot(dx, dy) / (cell * 1.15), 1, 3);
         spans.push({ start: total, ms });
         total += ms;
       }
@@ -722,7 +772,7 @@ export function createRenderer(svgEl, opts = {}) {
       class: `fx-ripple p${playerId}`, cx: r2(at.x), cy: r2(at.y), r: r2(cell * 0.3),
       fill: 'none', stroke: `var(--p${playerId})`, 'stroke-width': 3, 'stroke-opacity': 0.9,
     }, fx);
-    animate(RIPPLE_MS, (p) => {
+    animate(dur(RIPPLE_MS), (p) => {
       circle.setAttribute('r', r2(cell * (0.3 + 1.1 * p)));
       circle.setAttribute('stroke-opacity', r3(0.9 * (1 - p)));
     }).then(() => circle.remove());
@@ -745,7 +795,7 @@ export function createRenderer(svgEl, opts = {}) {
         positions.set(event.tokenId, { x: home.x, y: home.y, scale: 1 });
         relabel(node, state, event.playerId, event.tokenId);
       };
-      if (reducedMotion()) {
+      if (speed === 0 || reducedMotion()) {
         finish();
         return Promise.resolve();
       }
@@ -762,7 +812,7 @@ export function createRenderer(svgEl, opts = {}) {
         y: mid.y + ((mid.y - layout.center.y) / away) * bulge,
       };
 
-      return animate(CAPTURE_MS, (p) => {
+      return animate(dur(CAPTURE_MS), (p) => {
         const e = easeInOut(p);
         const inv = 1 - e;
         const x = inv * inv * here.x + 2 * inv * e * ctrl.x + e * e * home.x;
@@ -835,12 +885,12 @@ export function createRenderer(svgEl, opts = {}) {
         }
         paintFace(diceValue);
       };
-      if (reducedMotion()) {
+      if (speed === 0 || reducedMotion()) {
         settle();
         return Promise.resolve();
       }
       let shown = -1;
-      return animate(DICE_TUMBLE_MS, (p) => {
+      return animate(dur(DICE_TUMBLE_MS), (p) => {
         const frame = Math.min(DICE_FRAMES.length - 1, Math.floor(p * DICE_FRAMES.length));
         if (frame !== shown) {
           shown = frame;
@@ -984,6 +1034,8 @@ export function createRenderer(svgEl, opts = {}) {
     animateCapture,
     pulseTokens,
     clearPulse,
+    highlightToken,
+    setSpeed,
     cancelAnimations,
     setDice,
     shakeDice,
