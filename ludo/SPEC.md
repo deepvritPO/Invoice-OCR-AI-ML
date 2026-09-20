@@ -49,6 +49,8 @@ A token on the board has integer progress `t`:
 ```js
 export const PLAYERS, ARM_CELLS, RING, HOME_COLUMN, HOME_STEP, MAX_TOKENS;
 export const COLORS;          // 5 entries: {id, name, hex, dark, light, text}
+                              // must name the same hues css/styles.css paints as
+                              // --p0..--p4; `text` matches --player-ink there
 export const SAFE_CELLS;      // Set<number>
 export function startIndex(p);        // number
 export function entryIndex(p);        // number
@@ -199,10 +201,19 @@ Tokens are `<g class="token" data-token-id>` elements translated to `cellCenter`
 animation steps cell-to-cell (~90ms per cell, honouring `prefers-reduced-motion` by jumping).
 All colours come from CSS custom properties `--p0..--p4` so themes work.
 
+render.js may set `fill-opacity`/`stroke-opacity` presentation attributes as a stand-alone
+fallback, but **css/styles.css is authoritative for both colour and opacity**: a rule that
+restyles `.cell-face` must set the opacity too, or the stylesheet's colour is painted at
+render.js's fallback opacity and the board washes out. render.js reads `var(--p-ink, white)`
+for ink on a seat colour; styles.css defines `--p-ink` per `.pN`.
+
 ## 6. `js/ui.js` + `index.html`
 
 * Setup screen: 5 seats (name + Human/Bot + bot level), tokens per player (2/3/4),
   rule toggles, seed field, Start. Defaults: seat 1 human "You", seats 2-5 bots, 4 tokens.
+  Because that seat is literally named "You", every narrated line — engine log and UI
+  banner alike — agrees its verb with the seat name ("Your turn", "You have no legal
+  move"), and `describeChoice`'s third-person phrase is converted to the base form.
 * Game screen: SVG board, 5 player cards (colour, name, tokens home, turn indicator),
   dice button (Space / click), move log, New game, and a rules `<details>` panel.
 * Flow: roll -> if no moves, toast + auto pass after 700ms -> else highlight movable tokens;
@@ -213,7 +224,10 @@ All colours come from CSS custom properties `--p0..--p4` so themes work.
   `prefers-color-scheme` plus a manual toggle persisted in `localStorage` (wrapped in try/catch).
 * Game state persisted to `localStorage` after each move; offer "Resume game" if present.
 
-## 7. Tests (`node --test ludo/test`)
+## 7. Tests (`node --test "ludo/test/*.test.mjs"`)
+
+Note: the bare directory form `node --test ludo/test` fails on Node 22.x (it tries to
+`require` the directory). Use the glob form above.
 
 Cover: ring closure & geometry adjacency, start/entry offsets, safe-cell set, progress mapping,
 exit-on-six only, exact-roll-to-goal, capture + no-capture-on-safe, blocks (land + pass),

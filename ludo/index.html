@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pentagon Ludo — 5 Player Edition</title>
+<meta name="description" content="A dependency-free five-player Ludo variant played on a pentagon board with a 65-cell ring.">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="./css/styles.css">
+<script>
+  // Apply the stored theme before first paint so the page never flashes the wrong palette.
+  try {
+    var savedTheme = localStorage.getItem('pentagon-ludo:v1:theme');
+    if (savedTheme === 'light' || savedTheme === 'dark') {
+      document.documentElement.dataset.theme = savedTheme;
+    }
+  } catch (err) { /* storage unavailable — stay on auto */ }
+</script>
+</head>
+<body>
+
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <span class="pip p0"></span><span class="pip p1"></span><span class="pip p2"></span><span class="pip p3"></span><span class="pip p4"></span>
+    </span>
+    <span class="brand-text">
+      <strong>Pentagon Ludo</strong>
+      <small>5 players · 65-cell ring</small>
+    </span>
+  </div>
+  <div id="theme-toggle" class="theme-toggle" role="group" aria-label="Colour theme">
+    <button type="button" class="theme-btn" data-theme-mode="auto" aria-pressed="true">Auto</button>
+    <button type="button" class="theme-btn" data-theme-mode="light" aria-pressed="false">Light</button>
+    <button type="button" class="theme-btn" data-theme-mode="dark" aria-pressed="false">Dark</button>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ─────────────────────────  SETUP SCREEN  ───────────────────────── -->
+  <section id="screen-setup" class="screen screen-setup" aria-label="Game setup">
+
+    <div id="resume-card" class="resume-card" hidden>
+      <div>
+        <h2>Unfinished game found</h2>
+        <p id="resume-summary" class="muted">A saved game is waiting.</p>
+      </div>
+      <div class="resume-actions">
+        <button type="button" id="btn-resume" class="btn btn-primary">Resume game</button>
+        <button type="button" id="btn-discard" class="btn btn-ghost">Discard</button>
+      </div>
+    </div>
+
+    <form id="setup-form" class="setup-form" novalidate>
+      <h1 class="setup-title">Set up the table</h1>
+      <p class="setup-lead muted">Five seats around a pentagon. Seat 1 is you by default — swap any seat to a bot or back again.</p>
+
+      <fieldset class="seats">
+        <legend>Players</legend>
+
+        <div class="seat p0" id="seat-0">
+          <span class="seat-swatch" aria-hidden="true"></span>
+          <span class="seat-index">Seat 1</span>
+          <label class="field">
+            <span class="field-label">Name</span>
+            <input type="text" id="seat-0-name" name="seat-0-name" value="You" maxlength="14" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="field">
+            <span class="field-label">Type</span>
+            <select id="seat-0-kind" name="seat-0-kind">
+              <option value="human" selected>Human</option>
+              <option value="ai">Bot</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Bot skill</span>
+            <select id="seat-0-level" name="seat-0-level" disabled>
+              <option value="easy">Easy</option>
+              <option value="normal" selected>Normal</option>
+              <option value="hard">Hard</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="seat p1" id="seat-1">
+          <span class="seat-swatch" aria-hidden="true"></span>
+          <span class="seat-index">Seat 2</span>
+          <label class="field">
+            <span class="field-label">Name</span>
+            <input type="text" id="seat-1-name" name="seat-1-name" value="Aarav" maxlength="14" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="field">
+            <span class="field-label">Type</span>
+            <select id="seat-1-kind" name="seat-1-kind">
+              <option value="human">Human</option>
+              <option value="ai" selected>Bot</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Bot skill</span>
+            <select id="seat-1-level" name="seat-1-level">
+              <option value="easy">Easy</option>
+              <option value="normal" selected>Normal</option>
+              <option value="hard">Hard</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="seat p2" id="seat-2">
+          <span class="seat-swatch" aria-hidden="true"></span>
+          <span class="seat-index">Seat 3</span>
+          <label class="field">
+            <span class="field-label">Name</span>
+            <input type="text" id="seat-2-name" name="seat-2-name" value="Priya" maxlength="14" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="field">
+            <span class="field-label">Type</span>
+            <select id="seat-2-kind" name="seat-2-kind">
+              <option value="human">Human</option>
+              <option value="ai" selected>Bot</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Bot skill</span>
+            <select id="seat-2-level" name="seat-2-level">
+              <option value="easy">Easy</option>
+              <option value="normal" selected>Normal</option>
+              <option value="hard">Hard</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="seat p3" id="seat-3">
+          <span class="seat-swatch" aria-hidden="true"></span>
+          <span class="seat-index">Seat 4</span>
+          <label class="field">
+            <span class="field-label">Name</span>
+            <input type="text" id="seat-3-name" name="seat-3-name" value="Rohan" maxlength="14" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="field">
+            <span class="field-label">Type</span>
+            <select id="seat-3-kind" name="seat-3-kind">
+              <option value="human">Human</option>
+              <option value="ai" selected>Bot</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Bot skill</span>
+            <select id="seat-3-level" name="seat-3-level">
+              <option value="easy">Easy</option>
+              <option value="normal" selected>Normal</option>
+              <option value="hard">Hard</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="seat p4" id="seat-4">
+          <span class="seat-swatch" aria-hidden="true"></span>
+          <span class="seat-index">Seat 5</span>
+          <label class="field">
+            <span class="field-label">Name</span>
+            <input type="text" id="seat-4-name" name="seat-4-name" value="Meera" maxlength="14" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="field">
+            <span class="field-label">Type</span>
+            <select id="seat-4-kind" name="seat-4-kind">
+              <option value="human">Human</option>
+              <option value="ai" selected>Bot</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Bot skill</span>
+            <select id="seat-4-level" name="seat-4-level">
+              <option value="easy">Easy</option>
+              <option value="normal" selected>Normal</option>
+              <option value="hard">Hard</option>
+            </select>
+          </label>
+        </div>
+      </fieldset>
+
+      <div class="setup-grid">
+        <fieldset class="opt-card">
+          <legend>Tokens per player</legend>
+          <div class="segmented">
+            <input type="radio" id="tokens-2" name="tokens" value="2">
+            <label for="tokens-2">2</label>
+            <input type="radio" id="tokens-3" name="tokens" value="3">
+            <label for="tokens-3">3</label>
+            <input type="radio" id="tokens-4" name="tokens" value="4" checked>
+            <label for="tokens-4">4</label>
+          </div>
+          <p class="hint">Fewer tokens makes for a much shorter game.</p>
+        </fieldset>
+
+        <fieldset class="opt-card">
+          <legend>Rules</legend>
+          <label class="switch">
+            <input type="checkbox" id="rule-blocks" checked>
+            <span>Blocks — two of your tokens on one ring cell stop opponents</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="rule-capture" checked>
+            <span>Capture grants an extra turn</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="rule-threesixes" checked>
+            <span>Three sixes in a row forfeits the turn</span>
+          </label>
+        </fieldset>
+
+        <fieldset class="opt-card">
+          <legend>Seed</legend>
+          <div class="seed-row">
+            <label class="field field-grow">
+              <span class="field-label">Dice seed</span>
+              <input type="number" id="seed-input" value="12345" min="0" step="1" inputmode="numeric">
+            </label>
+            <button type="button" id="btn-random-seed" class="btn btn-ghost">Random</button>
+          </div>
+          <p class="hint">The same seed replays the same dice — handy for comparing tactics.</p>
+        </fieldset>
+      </div>
+
+      <button type="submit" id="btn-start" class="btn btn-primary btn-large">Start game</button>
+    </form>
+  </section>
+
+  <!-- ─────────────────────────  GAME SCREEN  ───────────────────────── -->
+  <section id="screen-game" class="screen screen-game" aria-label="Game board" hidden>
+
+    <div class="board-wrap">
+      <svg id="board" viewBox="0 0 1000 1000" role="img" aria-label="Ludo board"></svg>
+    </div>
+
+    <aside class="panel" aria-label="Game controls">
+
+      <div class="turn-card">
+        <p id="turn-banner" class="turn-banner">Ready</p>
+        <p id="turn-detail" class="turn-detail muted">Roll to begin.</p>
+        <div class="dice-row">
+          <button type="button" id="dice" class="dice" aria-label="Roll the dice">
+            <span id="dice-face">·</span>
+          </button>
+          <p id="dice-hint" class="hint">Click the dice, or press <kbd>Space</kbd>. Then pick a token by clicking it or pressing <kbd>1</kbd>–<kbd>4</kbd>.</p>
+        </div>
+      </div>
+
+      <ul id="player-cards" class="player-cards">
+        <li class="player-card p0" id="card-0" data-player="0">
+          <span class="card-dot" aria-hidden="true"></span>
+          <span class="card-name" id="card-0-name">You</span>
+          <span class="card-kind" id="card-0-kind">Human</span>
+          <span class="card-home" id="card-0-home">0/4 home</span>
+          <span class="card-rank" id="card-0-rank"></span>
+        </li>
+        <li class="player-card p1" id="card-1" data-player="1">
+          <span class="card-dot" aria-hidden="true"></span>
+          <span class="card-name" id="card-1-name">Aarav</span>
+          <span class="card-kind" id="card-1-kind">Bot</span>
+          <span class="card-home" id="card-1-home">0/4 home</span>
+          <span class="card-rank" id="card-1-rank"></span>
+        </li>
+        <li class="player-card p2" id="card-2" data-player="2">
+          <span class="card-dot" aria-hidden="true"></span>
+          <span class="card-name" id="card-2-name">Priya</span>
+          <span class="card-kind" id="card-2-kind">Bot</span>
+          <span class="card-home" id="card-2-home">0/4 home</span>
+          <span class="card-rank" id="card-2-rank"></span>
+        </li>
+        <li class="player-card p3" id="card-3" data-player="3">
+          <span class="card-dot" aria-hidden="true"></span>
+          <span class="card-name" id="card-3-name">Rohan</span>
+          <span class="card-kind" id="card-3-kind">Bot</span>
+          <span class="card-home" id="card-3-home">0/4 home</span>
+          <span class="card-rank" id="card-3-rank"></span>
+        </li>
+        <li class="player-card p4" id="card-4" data-player="4">
+          <span class="card-dot" aria-hidden="true"></span>
+          <span class="card-name" id="card-4-name">Meera</span>
+          <span class="card-kind" id="card-4-kind">Bot</span>
+          <span class="card-home" id="card-4-home">0/4 home</span>
+          <span class="card-rank" id="card-4-rank"></span>
+        </li>
+      </ul>
+
+      <section class="log-card" aria-label="Move log">
+        <h2 class="card-title">Move log</h2>
+        <ol id="log-list" class="log" aria-live="polite" aria-relevant="additions"></ol>
+      </section>
+
+      <div class="panel-actions">
+        <button type="button" id="btn-rematch" class="btn btn-ghost">Rematch</button>
+        <button type="button" id="btn-new-game" class="btn btn-ghost">New setup</button>
+      </div>
+
+      <details id="rules" class="rules">
+        <summary>How pentagon Ludo works</summary>
+        <div class="rules-body">
+          <p>Classic Ludo is four arms of thirteen cells — fifty-two in all. This variant adds
+             a fifth arm, so the shared ring is <strong>5 × 13 = 65 cells</strong> and the board
+             is a pentagon rather than a cross.</p>
+          <ul>
+            <li><strong>Leaving base.</strong> A token only leaves its base on a <strong>6</strong>,
+                landing on that player's start cell.</li>
+            <li><strong>The lap.</strong> From its start cell a token walks all 65 ring cells.
+                Sixty-four steps later it reaches its own arm tip, then turns inward into its
+                private <strong>home column</strong> of five cells.</li>
+            <li><strong>Exact roll home.</strong> The goal sits 70 steps from the start. You must
+                roll the exact number to enter it; an overshoot is simply not a legal move.</li>
+            <li><strong>Safe squares.</strong> Ten cells are safe — two per arm: every player's
+                start cell, and the star cell eight steps further on. Nothing is ever captured on
+                a safe square. Arm tips are <em>not</em> safe.</li>
+            <li><strong>Capture.</strong> Landing on an unsafe ring cell holding opponents sends
+                every opponent token on that cell back to its base — and, with the rule switched
+                on, earns you another roll.</li>
+            <li><strong>Blocks.</strong> Two or more of your own tokens on one ring cell form a
+                block. Opponents may neither land on it nor pass through it; your own tokens pass
+                freely. Home-column cells are never blocks.</li>
+            <li><strong>Sixes.</strong> A 6 earns another roll — but a third six in a row forfeits
+                the turn entirely, with no move played.</li>
+            <li><strong>Finishing.</strong> Get every token to the centre. The first player home
+                takes first place, and the rest keep playing for the remaining four places.</li>
+          </ul>
+        </div>
+      </details>
+
+      <p id="announcer" class="sr-only" role="status" aria-live="polite"></p>
+    </aside>
+  </section>
+</main>
+
+<dialog id="results" class="results" aria-labelledby="results-title">
+  <h2 id="results-title">Final standings</h2>
+  <ol id="results-list" class="results-list"></ol>
+  <div class="dialog-actions">
+    <button type="button" id="btn-play-again" class="btn btn-primary">Play again</button>
+    <button type="button" id="btn-new-setup" class="btn btn-ghost">New setup</button>
+  </div>
+</dialog>
+
+<script type="module" src="./js/ui.js"></script>
+</body>
+</html>
