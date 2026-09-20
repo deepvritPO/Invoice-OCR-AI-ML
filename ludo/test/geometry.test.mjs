@@ -224,3 +224,296 @@ test('geometry is pure: repeated calls return identical values', () => {
   assert.deepEqual(a, b);
   assert.deepEqual(G.progressToCell(3, 17), G.progressToCell(3, 17));
 });
+
+// ---------------------------------------------------------------------------
+// Arm-frame regressions.
+//
+// These exist because the board once shipped with a seven-slot middle column and
+// only six occupants: the tip was pushed one extra pitch out, so every arm had a
+// cell-sized hole in its innermost row and the home run never reached the goal.
+// ---------------------------------------------------------------------------
+
+const D2R = Math.PI / 180;
+const armAngle = (p) => (-90 + p * 72) * D2R;
+
+/** Board point -> the arm-local (u = outward along the axis, v = across) frame. */
+function localOf(pt, p) {
+  const a = armAngle(p);
+  const dx = pt.x - G.layout.center.x;
+  const dy = pt.y - G.layout.center.y;
+  return { u: dx * Math.cos(a) + dy * Math.sin(a), v: -dx * Math.sin(a) + dy * Math.cos(a) };
+}
+
+/**
+ * The four board-space corners of a cell. A cell is axis-aligned in its OWN arm's
+ * frame, so the corner offsets have to be rotated by that arm's angle — not by any
+ * other arm's.
+ */
+function cornersOf(pt, arm) {
+  const a = armAngle(arm);
+  const cos = Math.cos(a);
+  const sin = Math.sin(a);
+  const h = G.layout.cell / 2;
+  return [[-h, -h], [-h, h], [h, -h], [h, h]].map(([du, dv]) => ({
+    x: pt.x + du * cos - dv * sin,
+    y: pt.y + du * sin + dv * cos,
+  }));
+}
+
+/**
+ * The goal is a regular pentagon with its vertices on the arm axes, so its apothem is
+ * r * cos36 and the outward normal of the edge between vertex p and vertex p+1 points
+ * along armAngle(p) + 36deg. A point is inside iff it is inside all five edges.
+ */
+function insideGoal(pt, slack = 0) {
+  const { x: cx, y: cy } = G.layout.center;
+  const apothem = G.layout.goal.r * Math.cos(36 * D2R);
+  for (let p = 0; p < G.PLAYERS; p++) {
+    const n = armAngle(p) + 36 * D2R;
+    const d = (pt.x - cx) * Math.cos(n) + (pt.y - cy) * Math.sin(n);
+    if (d > apothem - slack) return false;
+  }
+  return true;
+}
+
+/** Distance from a point to the goal pentagon's boundary, positive when inside. */
+function goalClearance(pt) {
+  const { x: cx, y: cy } = G.layout.center;
+  const apothem = G.layout.goal.r * Math.cos(36 * D2R);
+  let worst = Infinity;
+  for (let p = 0; p < G.PLAYERS; p++) {
+    const n = armAngle(p) + 36 * D2R;
+    worst = Math.min(worst, apothem - ((pt.x - cx) * Math.cos(n) + (pt.y - cy) * Math.sin(n)));
+  }
+  return worst;
+}
+
+test('every arm cell sits on one of the six radial rows, in the right column', () => {
+  const cell = G.layout.cell;
+  for (let p = 0; p < G.PLAYERS; p++) {
+    // The outward ring column defines the six rows u1..u6.
+    const rows = [];
+    for (let j = 0; j <= 5; j++) {
+      const { u, v } = localOf(G.layout.ring[13 * p + j], p);
+      assert.ok(v < -0.5 * cell, `ring ${13 * p + j} should be the -v column, got v=${v.toFixed(2)}`);
+      rows.push(u);
+    }
+    for (let k = 1; k < rows.length; k++) {
+      const gap = rows[k] - rows[k - 1];
+      assert.ok(gap > 0.9 * cell && gap < 1.25 * cell,
+        `arm ${p} row ${k} is ${gap.toFixed(2)} from row ${k - 1}: not one pitch`);
+    }
+    // The inward ring column reuses the same six rows, walking back down.
+    for (let j = 7; j <= 12; j++) {
+      const { u, v } = localOf(G.layout.ring[13 * p + j], p);
+      assert.ok(v > 0.5 * cell, `ring ${13 * p + j} should be the +v column`);
+      assert.ok(Math.abs(u - rows[12 - j]) < 1e-6,
+        `ring ${13 * p + j} is off the row grid (u=${u.toFixed(2)})`);
+    }
+  }
+});
+
+test('the middle column has no empty radial slot between the tip and the goal', () => {
+  const cell = G.layout.cell;
+  for (let p = 0; p < G.PLAYERS; p++) {
+    // Rows u1..u6, read off the outward ring column of this same arm.
+    const rows = Array.from({ length: 6 }, (_, j) => localOf(G.layout.ring[13 * p + j], p).u);
+
+    // Occupants of the middle column, innermost first: home 4..0 then the tip.
+    const column = [];
+    for (let s = G.HOME_COLUMN - 1; s >= 0; s--) column.push({ id: `home${p}.${s}`, pt: G.layout.homes[p][s] });
+    column.push({ id: `tip${p}`, pt: G.layout.ring[G.entryIndex(p)] });
+
+    assert.equal(column.length, rows.length,
+      `arm ${p}: ${rows.length} radial rows but ${column.length} middle-column cells`);
+
+    column.forEach((occ, k) => {
+      const { u, v } = localOf(occ.pt, p);
+      assert.ok(Math.abs(v) < 1e-6, `${occ.id} is not on the arm axis (v=${v.toFixed(2)})`);
+      assert.ok(Math.abs(u - rows[k]) < 1e-6,
+        `${occ.id} sits at u=${u.toFixed(2)} but row ${k + 1} is at ${rows[k].toFixed(2)} — empty slot`);
+    });
+
+    // Belt and braces: no two consecutive occupants are more than one pitch apart.
+    for (let k = 1; k < column.length; k++) {
+      const gap = localOf(column[k].pt, p).u - localOf(column[k - 1].pt, p).u;
+      assert.ok(gap < 1.25 * cell,
+        `arm ${p}: ${column[k - 1].id} -> ${column[k].id} is ${gap.toFixed(2)}, a slot wide enough to hold a cell`);
+    }
+  }
+});
+
+test('the innermost home cell docks against the goal pentagon vertex', () => {
+  const cell = G.layout.cell;
+  for (let p = 0; p < G.PLAYERS; p++) {
+    const inner = G.layout.homes[p][G.HOME_COLUMN - 1];
+    const edge = localOf(inner, p).u - cell / 2; // inner edge of the last home cell
+    const gap = edge - G.layout.goal.r;          // the pentagon vertex lies on this axis
+    assert.ok(gap > 0, `p${p}: the goal wedge bites ${(-gap).toFixed(2)} into the last home cell`);
+    // A whole cell of clearance means a missing row; even half a cell reads as a
+    // corridor of bare board between the home run and the goal. It has to be a gutter.
+    assert.ok(gap < 0.5 * cell,
+      `p${p}: ${gap.toFixed(2)} (${(gap / cell).toFixed(2)} cell) of empty board between the last home cell and the goal — a corridor`);
+  }
+});
+
+test('the goal wedge never overlaps a ring or home cell', () => {
+  const cells = [
+    ...G.layout.ring.map((c, i) => [`ring${i}`, c, c.arm]),
+    ...G.layout.homes.flatMap((col, q) => col.map((h, s) => [`home${q}.${s}`, h, q])),
+  ];
+  for (const [id, c, arm] of cells) {
+    for (const corner of cornersOf(c, arm)) {
+      assert.equal(insideGoal(corner, 1e-9), false, `${id} has a corner inside the goal pentagon`);
+    }
+  }
+});
+
+test('four parked tokens fit inside a goal wedge', () => {
+  // render.js draws a goal token at tokenR = 0.36*cell with a 0.16*tokenR stroke, then
+  // scales the group by GOAL_SCALE = 0.72 -> outer radius 0.28 * cell.
+  const R = 0.28 * G.layout.cell;
+  for (let p = 0; p < G.PLAYERS; p++) {
+    const slots = G.layout.goalSlots[p];
+    slots.forEach((s, i) => {
+      assert.ok(goalClearance(s) >= R,
+        `goal slot ${p}.${i} has ${goalClearance(s).toFixed(2)} clearance, needs ${R.toFixed(2)}`);
+    });
+    for (let i = 0; i < slots.length; i++) {
+      for (let j = i + 1; j < slots.length; j++) {
+        assert.ok(dist(slots[i], slots[j]) >= 2 * R,
+          `goal slots ${p}.${i} and ${p}.${j} overlap (${dist(slots[i], slots[j]).toFixed(2)} < ${(2 * R).toFixed(2)})`);
+      }
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Seat palette: colour-vision separation, ink contrast, and agreement with the
+// stylesheet.
+//
+// The palette used to be chosen by hue alone and claimed in a comment to be
+// "separable under deuteranopia"; it was not — Jade/Orchid collapsed to deltaE76
+// 14.2 under deutan and Cobalt/Orchid to 23.8 under protan. These tests pin the
+// claim down numerically.
+// ---------------------------------------------------------------------------
+
+const CVD_THRESHOLD = 25; // deltaE76 below this is a documented confusion risk
+const INK_CONTRAST = 4.5; // WCAG AA for the numerals drawn on a seat colour
+
+const hex2rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+const toLinear = (c) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+const matmul = (m, v) => m.map((r) => r[0] * v[0] + r[1] * v[1] + r[2] * v[2]);
+
+const SRGB_TO_XYZ = [
+  [0.4124564, 0.3575761, 0.1804375],
+  [0.2126729, 0.7151522, 0.0721750],
+  [0.0193339, 0.1191920, 0.9503041],
+];
+// Hunt-Pointer-Estevez LMS, normalised to D65 (Viénot, Brettel & Mollon 1999)
+const RGB_TO_LMS = [
+  [0.31399022, 0.63951294, 0.04649755],
+  [0.15537241, 0.75789446, 0.08670142],
+  [0.01775239, 0.10944209, 0.87256922],
+];
+const LMS_TO_RGB = [
+  [5.47221206, -4.6419601, 0.16963708],
+  [-1.1252419, 2.29317094, -0.1678952],
+  [0.02980165, -0.19318073, 1.16364789],
+];
+const DICHROMAT = {
+  protan: [[0, 1.05118294, -0.05116099], [0, 1, 0], [0, 0, 1]],
+  deutan: [[1, 0, 0], [0.9513092, 0, 0.04866992], [0, 0, 1]],
+};
+
+/** Linear-sRGB as seen by a dichromat (or as-is for `normal`). */
+function simulate(hex, kind) {
+  const rgb = hex2rgb(hex).map(toLinear);
+  if (kind === 'normal') return rgb;
+  return matmul(LMS_TO_RGB, matmul(DICHROMAT[kind], matmul(RGB_TO_LMS, rgb)))
+    .map((c) => Math.max(0, Math.min(1, c)));
+}
+
+const D65 = [0.95047, 1.0, 1.08883];
+const labF = (t) => (t > 216 / 24389 ? Math.cbrt(t) : (841 / 108) * t + 4 / 29);
+function toLab(linearRGB) {
+  const f = matmul(SRGB_TO_XYZ, linearRGB).map((v, i) => labF(v / D65[i]));
+  return [116 * f[1] - 16, 500 * (f[0] - f[1]), 200 * (f[1] - f[2])];
+}
+const deltaE76 = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+const relLuminance = (hex) => {
+  const [r, g, b] = hex2rgb(hex).map(toLinear);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+const contrastRatio = (a, b) => {
+  const x = relLuminance(a);
+  const y = relLuminance(b);
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+};
+
+for (const variant of ['hex', 'dark']) {
+  test(`the ${variant === 'hex' ? 'light' : 'dark'}-theme seat hues survive deuteranopia and protanopia`, () => {
+    const hexes = G.COLORS.map((c) => c[variant]);
+    for (const kind of ['normal', 'deutan', 'protan']) {
+      const labs = hexes.map((h) => toLab(simulate(h, kind)));
+      for (let i = 0; i < labs.length; i++) {
+        for (let j = i + 1; j < labs.length; j++) {
+          const d = deltaE76(labs[i], labs[j]);
+          assert.ok(d >= CVD_THRESHOLD,
+            `${kind}: ${G.COLORS[i].name}/${G.COLORS[j].name} deltaE76 ${d.toFixed(1)} < ${CVD_THRESHOLD}`);
+        }
+      }
+    }
+  });
+}
+
+test('seat ink clears 4.5:1 on both variants of its own seat', () => {
+  for (const c of G.COLORS) {
+    for (const variant of ['hex', 'dark']) {
+      const ratio = contrastRatio(c.text, c[variant]);
+      assert.ok(ratio >= INK_CONTRAST,
+        `${c.name} ink ${c.text} on ${c[variant]} is ${ratio.toFixed(2)}:1, below ${INK_CONTRAST}:1`);
+    }
+  }
+});
+
+test('COLORS agrees exactly with the --p0..--p4 and --p-ink in css/styles.css', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const css = readFileSync(fileURLToPath(new URL('../css/styles.css', import.meta.url)), 'utf8');
+
+  /** The text of the first `{...}` block whose selector line contains `selector`. */
+  function blockAfter(selector) {
+    const at = css.indexOf(selector);
+    assert.ok(at >= 0, `css/styles.css has no ${selector} rule`);
+    const open = css.indexOf('{', at);
+    let depth = 0;
+    for (let i = open; i < css.length; i++) {
+      if (css[i] === '{') depth++;
+      else if (css[i] === '}' && --depth === 0) return css.slice(open + 1, i);
+    }
+    throw new Error(`unterminated block for ${selector}`);
+  }
+  const seatVars = (block) =>
+    Array.from({ length: G.PLAYERS }, (_, i) => {
+      const m = block.match(new RegExp(`--p${i}\\s*:\\s*(#[0-9a-fA-F]{3,8})`));
+      assert.ok(m, `--p${i} is missing from the block`);
+      return m[1].toLowerCase();
+    });
+
+  assert.deepEqual(seatVars(blockAfter(':root {')), G.COLORS.map((c) => c.hex.toLowerCase()),
+    'light --p0..--p4 must equal COLORS[].hex');
+  assert.deepEqual(seatVars(blockAfter(':root:not([data-theme="light"])')), G.COLORS.map((c) => c.dark.toLowerCase()),
+    'the prefers-color-scheme dark --p0..--p4 must equal COLORS[].dark');
+  assert.deepEqual(seatVars(blockAfter(':root[data-theme="dark"]')), G.COLORS.map((c) => c.dark.toLowerCase()),
+    'the [data-theme="dark"] --p0..--p4 must equal COLORS[].dark');
+
+  G.COLORS.forEach((c, i) => {
+    const m = css.match(new RegExp(`\\.p${i}\\s*\\{[^}]*--p-ink\\s*:\\s*(#[0-9a-fA-F]{3,8})`));
+    assert.ok(m, `.p${i} does not declare --p-ink`);
+    assert.equal(m[1].toLowerCase(), c.text.toLowerCase(), `.p${i} --p-ink must equal COLORS[${i}].text`);
+    const pi = css.match(new RegExp(`\\.p${i}\\s*\\{[^}]*--player-ink\\s*:\\s*(#[0-9a-fA-F]{3,8})`));
+    assert.ok(pi, `.p${i} does not declare --player-ink`);
+    assert.equal(pi[1].toLowerCase(), c.text.toLowerCase(), `.p${i} --player-ink must equal COLORS[${i}].text`);
+  });
+});

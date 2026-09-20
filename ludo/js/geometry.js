@@ -21,15 +21,22 @@ export const MAX_TOKENS = 4;
 
 /**
  * Seat palette. These are the same five hues css/styles.css paints as --p0..--p4,
- * chosen to stay separable under deuteranopia; `text` matches --player-ink there.
- * Keep the two in step: a seat's name must describe the colour a player sees.
+ * and `text` matches --player-ink there. Keep the two in step: a seat's name must
+ * describe the colour a player sees.
+ *
+ * The five hues are spread on lightness as well as hue, so that every pair stays
+ * above deltaE76 = 25 under simulated deuteranopia AND protanopia, in both themes
+ * (worst pair: 33.7 light / 38.6 dark deutan, 31.9 light / 30.8 dark protan — see
+ * test/geometry.test.mjs). `text` clears 4.5:1 against both the light and the dark
+ * variant of its own seat. Tritanopia is NOT solved by hue alone (Jade/Sky collapse):
+ * seats need a redundant non-colour channel for that.
  */
 export const COLORS = [
-  { id: 'amber', name: 'Amber', hex: '#e08a00', dark: '#f0a728', light: '#ffc879', text: '#241700' },
-  { id: 'azure', name: 'Azure', hex: '#005f9e', dark: '#3f90cf', light: '#9dc8ea', text: '#ffffff' },
-  { id: 'emerald', name: 'Emerald', hex: '#009e73', dark: '#2ec39b', light: '#7fdcb4', text: '#00241a' },
-  { id: 'orchid', name: 'Orchid', hex: '#c9609b', dark: '#e08bc0', light: '#efb9d8', text: '#2b0a1d' },
-  { id: 'sky', name: 'Sky', hex: '#79c9f2', dark: '#9edcfd', light: '#c7e9fb', text: '#04222f' },
+  { id: 'amber', name: 'Amber', hex: '#ce8d1b', dark: '#fbac23', light: '#fecf95', text: '#2d2419' },
+  { id: 'cobalt', name: 'Cobalt', hex: '#0f4cb8', dark: '#3369e0', light: '#d4d4ff', text: '#ffffff' },
+  { id: 'jade', name: 'Jade', hex: '#1ba98b', dark: '#0fb694', light: '#a6e4d1', text: '#0d2a23' },
+  { id: 'crimson', name: 'Crimson', hex: '#b0332f', dark: '#d23a3a', light: '#feccc4', text: '#ffffff' },
+  { id: 'sky', name: 'Sky', hex: '#4babea', dark: '#79b6e8', light: '#b6dbfe', text: '#16242f' },
 ];
 
 /** Ring indices that never capture: every start cell plus the star 8 steps ahead of it. */
@@ -49,7 +56,6 @@ const CELL = 46; // cell edge length — every other length is a multiple of thi
 
 const PITCH = 1.08 * CELL; // centre-to-centre spacing along an arm (u direction)
 const HALF_W = 1.06 * CELL; // |v| of the two ring columns; the home column sits at v = 0
-const TIP_GAP = 1.04 * CELL; // extra u between the last column cell and the tip
 
 const ARM_SWEEP_DEG = 360 / PLAYERS; // 72
 const ARM_BASE_DEG = -90; // arm 0 points straight up
@@ -65,9 +71,15 @@ const DEG = Math.PI / 180;
  */
 const TARGET_WRAP = 1.45 * CELL;
 
-const GOAL_R = 2.45 * CELL; // circumradius of the central pentagon (vertices on the arm axes)
+/**
+ * Circumradius of the central pentagon (vertices on the arm axes). The vertex has to
+ * dock against the innermost home cell without biting into it, so the hard ceiling is
+ * U[1] - CELL/2 = 2.19 * CELL; 2.10 leaves a 4.25-unit gutter, the same order as the
+ * 3.68-unit gutter between two ordinary cells.
+ */
+const GOAL_R = 2.10 * CELL;
 const ARM_PAD = 0.76 * CELL; // how far the decorative arm plate sits outside a cell centre
-const TIP_PAD = 0.95 * CELL; // how far the plate's point sits beyond the tip cell centre
+const TIP_PAD = 1.42 * CELL; // how far the plate's prow sits beyond the outermost cell centre
 
 const BASE_ANGLE_DEG = 31; // base sits this far from arm p's axis, towards arm p+1
 const BASE_R = 7.8 * CELL; // distance of the base plate centre from the board centre
@@ -137,10 +149,14 @@ function solveInnerRadius(target) {
 
 const U1 = solveInnerRadius(TARGET_WRAP);
 
-/** u[k] for k = 1..7: six column radii, then the tip. u[0] is unused. */
+/**
+ * u[k] for k = 1..6: the six radial rows of an arm. u[0] is unused.
+ * All three of an arm's columns use the same six rows — the two ring columns run
+ * U[1]..U[6], and the middle column is the five home cells U[1]..U[5] capped by the
+ * tip at U[6]. That is what makes an arm a solid 6 x 3 block with no empty slot.
+ */
 const U = [0, U1];
 for (let k = 2; k <= 6; k++) U[k] = U[k - 1] + PITCH;
-U[7] = U[6] + TIP_GAP;
 
 // ---------------------------------------------------------------------------
 // Ring, home columns, goal, bases, arm plates
@@ -157,7 +173,7 @@ function buildRing() {
         u = U[1 + j]; // outward column
         v = -HALF_W;
       } else if (j === 6) {
-        u = U[7]; // tip
+        u = U[6]; // tip — outermost row, between the two ring columns
         v = 0;
       } else {
         u = U[13 - j]; // inward column, back from U[6] down to U[1]
@@ -184,8 +200,9 @@ function buildHomes() {
   for (let p = 0; p < PLAYERS; p++) {
     const column = [];
     for (let step = 0; step < HOME_COLUMN; step++) {
-      // step 0 is the outermost home cell (u6), step 4 the innermost (u2)
-      const { x, y, rot } = place(U[6 - step], 0, p);
+      // step 0 is the outermost home cell (u5, just inside the tip), step 4 the
+      // innermost (u1), whose inner edge docks against the goal pentagon's vertex
+      const { x, y, rot } = place(U[5 - step], 0, p);
       column.push({ x, y, rot, step });
     }
     homes.push(column);
@@ -219,9 +236,12 @@ function buildGoal() {
 
 /** Four parking spots inside player p's goal wedge, authored in the arm-local frame. */
 function buildGoalSlots() {
+  // A 2 x 2 grid, chosen to maximise the clearance of a goal-sized token (radius
+  // 0.28 * CELL once render.js has applied GOAL_SCALE) from the wedge's two flanks,
+  // its outer edge, and from the other three tokens.
   const rows = [
-    { u: 0.46 * GOAL_R, v: 0.15 * GOAL_R },
-    { u: 0.71 * GOAL_R, v: 0.2 * GOAL_R },
+    { u: 0.44 * GOAL_R, v: 0.14 * GOAL_R },
+    { u: 0.72 * GOAL_R, v: 0.14 * GOAL_R },
   ];
   return Array.from({ length: PLAYERS }, (_, p) =>
     rows.flatMap(({ u, v }) => [place(u, -v, p), place(u, v, p)]).map(({ x, y }) => ({ x, y }))
@@ -288,7 +308,7 @@ function buildArmOutlines(midR) {
       [notchU, -notchV],
       [flankU, -flankV],
       [U[6] + ARM_PAD, -flankV],
-      [U[7] + TIP_PAD, 0], // the point of the arm
+      [U[6] + TIP_PAD, 0], // the prow of the arm, past the full-width outermost row
       [U[6] + ARM_PAD, flankV],
       [flankU, flankV],
       [notchU, notchV],

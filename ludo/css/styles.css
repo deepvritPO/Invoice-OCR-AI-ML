@@ -1,16 +1,19 @@
 /* ==========================================================================
    Pentagon Ludo — design system + board styling
-   Player hues are Okabe–Ito picks: no two adjacent seats differ by red/green
-   alone, and every neighbouring pair also separates by lightness.
+   Seat hues are spread on lightness as well as hue, so that no pair collapses
+   under deuteranopia or protanopia: every pair stays above deltaE76 = 25 in
+   both themes (worst: 33.7 light / 38.6 dark deutan, 31.9 / 30.8 protan).
+   These five must stay byte-identical to COLORS in js/geometry.js, and the
+   per-seat --player-ink / --p-ink below must match COLORS[].text there.
    ========================================================================== */
 
 :root {
   /* seat colours */
-  --p0: #e08a00;   /* amber      */
-  --p1: #005f9e;   /* deep blue  */
-  --p2: #009e73;   /* green      */
-  --p3: #c9609b;   /* orchid     */
-  --p4: #79c9f2;   /* light sky  */
+  --p0: #ce8d1b;   /* amber   L* 64 */
+  --p1: #0f4cb8;   /* cobalt  L* 35 */
+  --p2: #1ba98b;   /* jade    L* 62 */
+  --p3: #b0332f;   /* crimson L* 41 */
+  --p4: #4babea;   /* sky     L* 67 */
 
   /* surfaces */
   --bg: #f4f1ea;
@@ -51,11 +54,11 @@
 /* dark palette: system preference, unless the page is pinned to light */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --p0: #f0a728;
-    --p1: #3f90cf;
-    --p2: #2ec39b;
-    --p3: #e08bc0;
-    --p4: #9edcfd;
+    --p0: #fbac23;   /* amber   L* 76 */
+    --p1: #3369e0;   /* cobalt  L* 47 */
+    --p2: #0fb694;   /* jade    L* 66 */
+    --p3: #d23a3a;   /* crimson L* 48 */
+    --p4: #79b6e8;   /* sky     L* 72 */
 
     --bg: #12131a;
     --bg-accent: #171a23;
@@ -86,11 +89,11 @@
 
 /* dark palette: explicit toggle */
 :root[data-theme="dark"] {
-  --p0: #f0a728;
-  --p1: #3f90cf;
-  --p2: #2ec39b;
-  --p3: #e08bc0;
-  --p4: #9edcfd;
+  --p0: #fbac23;   /* amber   L* 76 */
+  --p1: #3369e0;   /* cobalt  L* 47 */
+  --p2: #0fb694;   /* jade    L* 66 */
+  --p3: #d23a3a;   /* crimson L* 48 */
+  --p4: #79b6e8;   /* sky     L* 72 */
 
   --bg: #12131a;
   --bg-accent: #171a23;
@@ -118,12 +121,14 @@
   --shadow-2: 0 8px 28px rgb(0 0 0 / 50%);
 }
 
-/* Each seat class carries its hue plus an ink colour that reads on top of it. */
-.p0 { --player: var(--p0); --player-ink: #241700; --p-ink: #241700; }
+/* Each seat class carries its hue plus an ink colour that reads on top of it.
+   The ink is theme-independent, so it clears 4.5:1 against BOTH the light and the
+   dark variant of its seat (5.41/8.00, 7.65/4.96, 5.17/5.93, 6.25/4.77, 6.26/7.28). */
+.p0 { --player: var(--p0); --player-ink: #2d2419; --p-ink: #2d2419; }
 .p1 { --player: var(--p1); --player-ink: #ffffff; --p-ink: #ffffff; }
-.p2 { --player: var(--p2); --player-ink: #00241a; --p-ink: #00241a; }
-.p3 { --player: var(--p3); --player-ink: #2b0a1d; --p-ink: #2b0a1d; }
-.p4 { --player: var(--p4); --player-ink: #04222f; --p-ink: #04222f; }
+.p2 { --player: var(--p2); --player-ink: #0d2a23; --p-ink: #0d2a23; }
+.p3 { --player: var(--p3); --player-ink: #ffffff; --p-ink: #ffffff; }
+.p4 { --player: var(--p4); --player-ink: #16242f; --p-ink: #16242f; }
 
 /* ── base ─────────────────────────────────────────────────────────────────── */
 
@@ -674,10 +679,14 @@ select:disabled, input:disabled { opacity: .55; }
 .goal-wedge.is-active { fill: color-mix(in srgb, var(--player) 82%, var(--goal-bg)); }
 .cell--start.is-active .cell-face { stroke-width: 3.4; }
 
-/* While a move animates, pointer input is ignored (ui.js also gates it in JS). */
-body.is-busy .token { cursor: default; }
-body.is-busy #board { pointer-events: none; }
-.goal-disc { fill: var(--goal-bg); stroke: var(--cell-line); stroke-width: 2; }
+/* While a bot plays or a move animates the board stays clickable: ui.js gates the
+   pick in JS and answers a stray click with a spoken reason. Blocking pointer events
+   here made that reason unreachable for mouse and touch, so only the cursor changes. */
+body.is-busy .token { cursor: not-allowed; }
+
+/* The current player's own tokens that cannot be played this turn (aria-disabled). */
+.token[aria-disabled="true"] { cursor: not-allowed; }
+.token[aria-disabled="true"] .token-disc { opacity: .62; }
 
 .token { cursor: default; }
 .token-disc {

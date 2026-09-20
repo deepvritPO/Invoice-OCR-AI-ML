@@ -1,7 +1,7 @@
 // ui.js — setup form, turn loop, persistence and keyboard wiring.
 // Owns every DOM node outside the <svg id="board">, which belongs to render.js.
 
-import { MAX_TOKENS } from './geometry.js';
+import { HOME_STEP, MAX_TOKENS } from './geometry.js';
 import {
   DEFAULT_RULES,
   createGame,
@@ -18,7 +18,9 @@ import { chooseMove, describeChoice } from './ai.js';
 import { createRenderer } from './render.js';
 
 const SAVE_KEY = 'pentagon-ludo:v1';
-const THEME_KEY = 'pentagon-ludo:v1:theme';
+// index.html has to read this before the first paint, long before this module loads,
+// so the literal lives there and is published on window. Derived fallback only.
+const THEME_KEY = (typeof window !== 'undefined' && window.LUDO_THEME_KEY) || `${SAVE_KEY}:theme`;
 
 const DEFAULT_NAMES = ['You', 'Aarav', 'Priya', 'Rohan', 'Meera'];
 const SEAT_COUNT = 5;
@@ -28,6 +30,7 @@ const PASS_MS = 700;        // pause on "no legal moves" before the turn passes
 const AUTO_MOVE_MS = 320;   // beat before the single forced move plays itself
 const SELECT_FLASH_MS = 140;
 const MAX_LOG_LINES = 80;
+const REJECT_HOLD_MS = 2600;  // how long a rejection stays in #turn-detail before the guidance returns
 
 const el = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -52,7 +55,10 @@ let renderer = null;
 let loopId = 0;           // bumped to abandon an in-flight turn loop
 let rollResolver = null;  // set while waiting for a human to roll
 let moveResolver = null;  // {ids, resolve} while waiting for a human to pick a token
+let humanPick = null;     // {ids, playerId} while a human is choosing — drives token a11y
 let seenLogIds = new Set();
+let announceFrame = 0;
+let rejectTimer = 0;
 
 /* ── theme ───────────────────────────────────────────────────────────────────── */
 
@@ -128,6 +134,13 @@ function randomSeed() {
 
 /* ── screens ─────────────────────────────────────────────────────────────────── */
 
+// Leaving the game screen otherwise drops focus on <body>: the control that was
+// clicked is hidden by the swap. Called from the handlers, never on first paint.
+function focusSetup() {
+  const target = el('seat-0-name');
+  if (target && target.getClientRects().length > 0) target.focus({ preventScroll: true });
+}
+
 function showScreen(which) {
   el('screen-setup').hidden = which !== 'setup';
   el('screen-game').hidden = which !== 'game';
@@ -202,10 +215,88 @@ function verbPhrase(player, phrase) {
   return [BASE_FORM.get(first) ?? first, ...rest].join(' ');
 }
 
+/**
+ * #announcer is aria-live="polite": writing the same string twice is a no-op for most
+ * screen readers, so clear it and set it on the next frame. Rejecting the same token
+ * twice has to be spoken twice.
+ */
+function speak(text) {
+  const node = el('announcer');
+  if (announceFrame) cancelAnimationFrame(announceFrame);
+  node.textContent = '';
+  const say = () => { announceFrame = 0; node.textContent = text; };
+  if (typeof requestAnimationFrame === 'function') announceFrame = requestAnimationFrame(say);
+  else say();
+}
+
 function announce(text, detail) {
   el('turn-banner').textContent = text;
   if (detail !== undefined) el('turn-detail').textContent = detail;
-  el('announcer').textContent = detail ? `${text}. ${detail}` : text;
+  speak(detail ? `${text}. ${detail}` : text);
+}
+
+/** The guidance line shown while the human is choosing a token. */
+function pickPrompt() {
+  return `Pick a token — click it, or press 1–${game ? game.tokensPerPlayer : MAX_TOKENS}.`;
+}
+
+/**
+ * Say WHY a pick did nothing. Silence here is the single worst keyboard bug in the
+ * app: a rejected key or click gave no banner, no log line and no live-region text.
+ */
+function reject(reason) {
+  el('turn-detail').textContent = reason;
+  speak(reason);
+  // One timer only: a second rejection must not be wiped by the first one's restore.
+  if (rejectTimer) clearTimeout(rejectTimer);
+  rejectTimer = 0;
+  if (moveResolver) {
+    rejectTimer = setTimeout(() => {
+      rejectTimer = 0;
+      if (moveResolver) el('turn-detail').textContent = pickPrompt();
+    }, REJECT_HOLD_MS);
+  }
+}
+
+/** Why this particular token cannot be played right now, in the player's words. */
+function rejectReason(tokenId) {
+  if (!game) return 'No game in progress.';
+  const player = currentPlayer(game);
+  const who = player ? player.name : 'another player';
+  if (!moveResolver) {
+    if (player && player.kind !== 'human') return `It's ${who}'s turn — wait for the bot.`;
+    if (game.phase === 'roll') return 'Nothing to pick yet — roll the dice first.';
+    return 'Nothing to pick right now.';
+  }
+
+  const parsed = /^p(\d+)t(\d+)$/.exec(String(tokenId || ''));
+  if (!parsed) return 'That is not a token you can play.';
+  const owner = Number(parsed[1]);
+  const number = Number(parsed[2]);
+  if (owner !== game.turn) {
+    const other = game.players[owner];
+    return other ? `That's ${other.name}'s token.` : 'That is not your token.';
+  }
+  const token = player.tokens.find((t) => t.id === tokenId);
+  if (!token) {
+    return `There is no token ${number} — press 1–${game.tokensPerPlayer}.`;
+  }
+
+  const roll = game.dice;
+  if (token.place === 'goal') return `Token ${number} is already home.`;
+  if (token.place === 'base') {
+    return roll === 6
+      ? `Token ${number} is in base and the start cell is blocked.`
+      : `Token ${number} is in base — you need a 6.`;
+  }
+  if (token.t + roll > HOME_STEP) {
+    return `Token ${number} can't move ${roll} without overshooting home.`;
+  }
+  // A 6 with a token waiting in base: the engine forces the exit and nothing else.
+  if (roll === 6 && legalMoves(game).every((m) => m.kind === 'exit')) {
+    return `On a 6 you must bring a token out of base first.`;
+  }
+  return `Token ${number} is blocked — an opponent block is in the way.`;
 }
 
 function setBusy(busy) {
@@ -213,13 +304,42 @@ function setBusy(busy) {
   el('dice').disabled = busy || !game || game.phase !== 'roll';
 }
 
+/** The seat this browser's user plays, so the renderer knows whose tokens are controls. */
+function humanSeat() {
+  if (humanPick) return humanPick.playerId;
+  if (!game) return null;
+  const seat = game.players.findIndex((p) => p.kind === 'human');
+  return seat < 0 ? null : seat;
+}
+
 function syncBoard(movableTokenIds = [], selectedTokenId = null) {
-  renderer.sync(game, { movableTokenIds, selectedTokenId, activePlayer: game.turn });
+  renderer.sync(game, {
+    movableTokenIds,
+    selectedTokenId,
+    activePlayer: game.turn,
+    pickPhase: humanPick !== null,
+    humanSeat: humanSeat(),
+  });
   renderPlayerCards();
   drainEngineLog();
 }
 
 /* ── human input ─────────────────────────────────────────────────────────────── */
+
+/**
+ * Abandon whatever the turn loop is awaiting. Nulling the resolvers without calling
+ * them left the old loop suspended forever, pinning its game state; resolving with a
+ * cancel sentinel lets it reach its next alive() check and return.
+ */
+function cancelPendingInput() {
+  const roll = rollResolver;
+  const move = moveResolver;
+  rollResolver = null;
+  moveResolver = null;
+  humanPick = null;
+  if (roll) roll();
+  if (move) move.resolve(null);
+}
 
 function requestRoll() {
   if (!rollResolver) return;
@@ -229,14 +349,17 @@ function requestRoll() {
 }
 
 function pickToken(tokenId) {
-  if (!moveResolver || !moveResolver.ids.includes(tokenId)) return;
+  if (!moveResolver || !moveResolver.ids.includes(tokenId)) {
+    reject(rejectReason(tokenId));
+    return;
+  }
   const { resolve } = moveResolver;
   moveResolver = null;
   resolve(tokenId);
 }
 
 function pickTokenByNumber(n) {
-  if (!moveResolver || !game) return;
+  if (!game) { reject('No game in progress.'); return; }
   pickToken(`p${game.turn}t${n}`);
 }
 
@@ -265,14 +388,37 @@ function focusDice() {
   el('dice').focus({ preventScroll: true });
 }
 
+/**
+ * Park focus on a token when the pick opens. Disabling the dice at roll time blurs it
+ * to <body>, and <body> is not a `.token`, so the renderer's Arrow/Home/End roving was
+ * unreachable for the whole pick phase. Same "only if the user is not busy" rule as
+ * focusDice(), minus the `.token` clause — a token already focused is where we want it.
+ */
+function focusToken(tokenId) {
+  const node = document.querySelector(`[data-token-id="${tokenId}"]`);
+  if (!node) return;
+  const active = document.activeElement;
+  const parked = !active
+    || active === document.body
+    || !active.isConnected
+    || active.closest('[hidden]') !== null
+    || active.getClientRects().length === 0;
+  if (!parked) return;
+  node.focus({ preventScroll: true });
+}
+
 async function waitForTokenChoice(moves) {
   const ids = moves.map((m) => m.tokenId);
+  humanPick = { ids, playerId: game.turn };
   syncBoard(ids, null);
   renderer.pulseTokens(ids);
   setBusy(false);
+  focusToken(ids[0]);
   const tokenId = await new Promise((resolve) => { moveResolver = { ids, resolve }; });
   moveResolver = null;
+  humanPick = null;
   renderer.clearPulse();
+  if (tokenId === null) return null;   // cancelled by New game / Rematch
   setBusy(true);
   syncBoard(ids, tokenId);          // flash the selection before the token starts moving
   await sleep(SELECT_FLASH_MS);
@@ -352,8 +498,7 @@ async function runLoop() {
       pushLog(`${player.name} ${verbPhrase(player, describeChoice(move))}`, player.id);
       tokenId = move.tokenId;
     } else {
-      announce(`${player.name} rolled ${game.dice}`,
-        `Pick a token — click it, or press 1–${game.tokensPerPlayer}.`);
+      announce(`${player.name} rolled ${game.dice}`, pickPrompt());
       tokenId = await waitForTokenChoice(moves);
     }
     if (!alive()) return;
@@ -374,19 +519,26 @@ async function runLoop() {
 
 function beginGame(state, seatList) {
   loopId += 1;              // abandon any loop still awaiting input
-  rollResolver = null;
-  moveResolver = null;
+  cancelPendingInput();
+  if (renderer) renderer.cancelAnimations();
   game = state;
   config = { seats: seatList, tokensPerPlayer: state.tokensPerPlayer, rules: state.rules };
   seenLogIds = new Set();
   el('log-list').replaceChildren();
+  el('resume-error').hidden = true;   // a fresh table clears the "save discarded" notice
   ensureRenderer();
   showScreen('game');
-  el('results').close();
+  closeResults();
+  // The static hint used to say "1-4" in every game, contradicting pickPrompt() in
+  // 2- and 3-token games. Both now read game.tokensPerPlayer.
+  const hintMax = el('dice-hint-max');
+  if (hintMax) hintMax.textContent = String(game.tokensPerPlayer);
   syncBoard();
   renderer.setDice(game.dice, { rolling: false });
   persist();
-  runLoop();
+  // runLoop() is async: a failure here lands in a detached promise that no try/catch
+  // around beginGame() could ever see, so it has to be caught at the source.
+  runLoop().catch(abandonGame);
 }
 
 function startFromForm(seed) {
@@ -417,6 +569,32 @@ function endGame() {
   announce('Game over', 'Final standings are in.');
   syncBoard();
   showResults();
+}
+
+let resultsDismissHandled = false;
+
+/**
+ * Deliberate closes hand focus on themselves; a bare Escape does not, because
+ * endGame() disables #dice before showModal() and the dialog then has nothing to
+ * restore focus to — it lands on <body>.
+ */
+function closeResults({ restoreFocus = false } = {}) {
+  const dialog = el('results');
+  if (!dialog.open) return;   // close() on a shut dialog fires no event: do not strand the flag
+  resultsDismissHandled = !restoreFocus;
+  dialog.close();
+}
+
+function initResultsFocus() {
+  el('results').addEventListener('close', () => {
+    const handled = resultsDismissHandled;
+    resultsDismissHandled = false;
+    if (handled) return;
+    const target = el('btn-rematch');
+    if (target && !target.disabled && target.getClientRects().length > 0) {
+      target.focus({ preventScroll: true });
+    }
+  });
 }
 
 function showResults() {
@@ -456,17 +634,65 @@ function persist() {
   }));
 }
 
+const PLACES = new Set(['base', 'track', 'goal']);   // the only values engine.js writes
+const PHASES = new Set(['roll', 'move']);            // 'over' is "nothing to resume"
+const TOKEN_COUNTS = [2, 3, 4];                      // must match engine.js
+
+/**
+ * A save only has to survive JSON.parse and a version check to reach us; past that
+ * it is hostile input. Every field the game screen indexes into is checked here,
+ * before the resume card is offered — a half-written entry used to brick the app.
+ */
+function isPlayableState(state) {
+  if (!state || typeof state !== 'object') return false;
+  if (!PHASES.has(state.phase)) return false;
+  if (!TOKEN_COUNTS.includes(state.tokensPerPlayer)) return false;
+  if (!Number.isInteger(state.turn) || state.turn < 0 || state.turn >= SEAT_COUNT) return false;
+  if (!Array.isArray(state.players) || state.players.length !== SEAT_COUNT) return false;
+  return state.players.every((p, i) => p
+    && typeof p === 'object'
+    && p.id === i
+    && typeof p.name === 'string'
+    && Array.isArray(p.tokens)
+    && p.tokens.length === state.tokensPerPlayer
+    && p.tokens.every((t, k) => t
+      && typeof t === 'object'
+      && t.id === `p${i}t${k + 1}`   // pickTokenByNumber() addresses tokens by this exact id
+      && PLACES.has(t.place)
+      && Number.isInteger(t.t)));
+}
+
 function loadSave() {
   const raw = readStore(SAVE_KEY);
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
     const state = deserialize(parsed.state);
-    if (!state || state.phase === 'over' || !Array.isArray(state.players)) return null;
+    if (!isPlayableState(state)) { dropStore(SAVE_KEY); return null; }
     return { state, seats: parsed.seats || state.players.map((p) => ({ name: p.name, kind: p.kind, aiLevel: p.aiLevel })) };
   } catch {
+    dropStore(SAVE_KEY);   // pure junk used to linger forever and be re-parsed on every load
     return null;
   }
+}
+
+/**
+ * Last line of defence: whatever slips past validation must not leave a half-built
+ * game screen behind with a dead dice button. Tear the session down to a clean setup.
+ */
+function abandonGame(err) {
+  console.warn('Saved game could not be loaded', err);
+  loopId += 1;
+  cancelPendingInput();
+  if (renderer) renderer.cancelAnimations();
+  game = null;
+  config = null;
+  dropStore(SAVE_KEY);
+  el('resume-card').hidden = true;
+  el('resume-error').hidden = false;
+  closeResults();
+  showScreen('setup');
+  focusSetup();
 }
 
 function offerResume() {
@@ -477,7 +703,11 @@ function offerResume() {
   el('resume-card').hidden = false;
   el('btn-resume').addEventListener('click', () => {
     el('resume-card').hidden = true;
-    beginGame(saved.state, saved.seats);
+    try {
+      beginGame(saved.state, saved.seats);
+    } catch (err) {
+      abandonGame(err);
+    }
   });
   el('btn-discard').addEventListener('click', () => {
     dropStore(SAVE_KEY);
@@ -508,22 +738,24 @@ function initGameControls() {
 
   el('btn-new-game').addEventListener('click', () => {
     loopId += 1;
-    rollResolver = null;
-    moveResolver = null;
-    el('results').close();
+    cancelPendingInput();
+    if (renderer) renderer.cancelAnimations();   // stop any hop/capture still in flight
+    closeResults();
     showScreen('setup');
+    focusSetup();
   });
 
   el('btn-rematch').addEventListener('click', rematch);
 
   el('btn-play-again').addEventListener('click', () => {
-    el('results').close();
+    closeResults();
     rematch();
   });
 
   el('btn-new-setup').addEventListener('click', () => {
-    el('results').close();
+    closeResults();
     showScreen('setup');
+    focusSetup();
   });
 }
 
@@ -532,7 +764,7 @@ function initKeyboard() {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
 
     if (event.key === 'Escape') {
-      if (el('results').open) el('results').close();
+      closeResults({ restoreFocus: true });
       return;
     }
     if (document.body.dataset.screen !== 'game') return;
@@ -550,18 +782,18 @@ function initKeyboard() {
       pickToken(tokenEl.dataset.tokenId);
       return;
     }
-    // Let a focused button handle its own activation key.
-    if (target instanceof Element && target.closest('button, summary, a[href]')) return;
-
     if (isActivate) {
+      // Let a focused button, summary or link handle its own activation key.
+      if (target instanceof Element && target.closest('button, summary, a[href]')) return;
       event.preventDefault();
       requestRoll();
       return;
     }
-    const n = Number(event.key);
-    if (Number.isInteger(n) && n >= 1 && n <= MAX_TOKENS) {
+    // Every digit is answered, whatever holds focus: 1..tokensPerPlayer plays,
+    // anything else gets a spoken reason from rejectReason().
+    if (/^[0-9]$/.test(event.key)) {
       event.preventDefault();
-      pickTokenByNumber(n);
+      pickTokenByNumber(Number(event.key));
     }
   });
 }
@@ -569,6 +801,7 @@ function initKeyboard() {
 initTheme();
 initSetupForm();
 initGameControls();
+initResultsFocus();
 initKeyboard();
 showScreen('setup');
 offerResume();

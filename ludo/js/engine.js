@@ -89,9 +89,18 @@ function verb(player, third, second) {
   return isSecondPerson(player) ? second : third;
 }
 
+/**
+ * How many log entries a state keeps. Unbounded, a long game reached ~3900 entries and
+ * every persist() rewrote a ~260 KB localStorage payload. Trimming from the front is
+ * safe: ids are derived from the last entry, so they stay monotonic and the UI's
+ * seen-id de-duplication still works; the on-screen log only shows 80 lines anyway.
+ */
+const MAX_LOG = 200;
+
 function pushLog(state, text, playerId = null) {
   const last = state.log[state.log.length - 1];
   state.log.push({ id: (last ? last.id : 0) + 1, text, playerId });
+  if (state.log.length > MAX_LOG) state.log.splice(0, state.log.length - MAX_LOG);
 }
 
 /** Next player in seat order who is still racing; falls back to `from`. */

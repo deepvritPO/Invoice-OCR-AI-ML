@@ -15,8 +15,11 @@ ludo/
   js/render.js        SVG drawing + animation         (imports geometry.js only)
   js/ui.js            wiring: engine + render + DOM   (imports all)
   test/*.test.mjs     `node --test` suites, zero deps
+  test/browser-a11y.mjs  manual Playwright smoke check (NOT picked up by `node --test`)
   serve.mjs           tiny static server (node, no deps)
+  assets/*.png        README screenshots
   README.md
+  SPEC.md
 ```
 
 ## 1. Board geometry (the 5-player generalisation)
@@ -27,9 +30,14 @@ Classic Ludo = 4 arms x 13 ring cells = 52. We generalise to **5 arms x 13 = 65*
 * Arm `i` owns ring indices `13i .. 13i+12`, laid out in a local frame where
   `u` = outward along the arm axis, `v` = perpendicular:
   * `13i+0 .. 13i+5` — outward column, `v = -w`, `u = u1..u6`
-  * `13i+6`          — **tip**, `v = 0`, `u = u7`
+  * `13i+6`          — **tip**, `v = 0`, `u = u6`
   * `13i+7 .. 13i+12` — inward column, `v = +w`, `u = u6..u1`
-  * The arm's middle column (`v = 0`, `u = u6..u2`, 5 cells) is player `i`'s **home column**.
+  * The arm's middle column (`v = 0`, `u = u5..u1`, 5 cells) is player `i`'s **home column**.
+  * An arm therefore fills all six radial rows `u1..u6` in all three columns — a solid
+    **6 x 3 block** with no empty slot. The tip caps the middle column at its outer end
+    (the classic Ludo turn cell); the innermost home cell (`u1`) is the inner end, and the
+    goal pentagon's vertex docks against it (`GOAL_R <= u1 - cell/2`), so the home run
+    flows straight into the goal wedge with no corridor between them.
 * Arm `i` is rotated by `-90deg + i*72deg` about the board centre. Cell `13i+12`
   (u1, +w) sits next to cell `13(i+1)+0` (u1, -w) of the next arm, so the ring closes.
 * `startIndex(p) = 13p + 7` — first cell of arm p's inward column (outer end, next to p's base).
@@ -50,7 +58,11 @@ A token on the board has integer progress `t`:
 export const PLAYERS, ARM_CELLS, RING, HOME_COLUMN, HOME_STEP, MAX_TOKENS;
 export const COLORS;          // 5 entries: {id, name, hex, dark, light, text}
                               // must name the same hues css/styles.css paints as
-                              // --p0..--p4; `text` matches --player-ink there
+                              // --p0..--p4; `text` matches --player-ink there.
+                              // Palette contract: in BOTH themes every pair of seat
+                              // hues stays >= deltaE76 25 under simulated deuteranopia
+                              // and protanopia, and `text` clears 4.5:1 on both the
+                              // light and the dark variant of its own seat.
 export const SAFE_CELLS;      // Set<number>
 export function startIndex(p);        // number
 export function entryIndex(p);        // number
@@ -125,7 +137,9 @@ export function serialize(state) / deserialize(str);
   sixStreak: 0..3,
   extraTurn: boolean,
   finishedOrder: [playerId...],
-  log: [ {id, text, playerId|null} ],   // newest last, human readable
+  log: [ {id, text, playerId|null} ],   // newest last, human readable; capped at the
+                                       // last 200 entries (ids stay monotonic), so the
+                                       // persisted save cannot grow without bound
   moveCount, winner: playerId|null,
 }
 ```
@@ -185,18 +199,27 @@ plus one-ply retaliation check.
 ## 5. `js/render.js`
 
 ```js
-export function createRenderer(svgEl, opts);   // opts: {onTokenClick(tokenId), onCellHover?}
+export function createRenderer(svgEl, opts);
+// opts: {onTokenClick(tokenId), onCellHover?, diceEl?, diceFaceEl?}
 // returns:
 {
   mount(),                                      // draw static board once
-  sync(state, {movableTokenIds, selectedTokenId, activePlayer}),  // reposition all tokens
+  sync(state, {movableTokenIds, selectedTokenId, activePlayer, pickPhase, humanSeat}),
   animateMove(event, state) -> Promise,         // steps a token along event.path
   animateCapture(event, state) -> Promise,
   pulseTokens(tokenIds), clearPulse(),
+  cancelAnimations(),                           // see below
   setDice(value, {rolling}), shakeDice() -> Promise,
   destroy()
 }
 ```
+`cancelAnimations()` stops every animation in flight **and settles its promises**, so a
+pending `await animateMove(...)` cannot hang; the UI calls it before starting, restarting
+or abandoning a game (`destroy()` and the internal board teardown use it too). It is not
+the same as `destroy()`: the renderer stays usable afterwards.
+
+`sync()`'s `pickPhase` (the human is choosing a token right now) and `humanSeat` (the seat
+this browser's user plays, or `null`) drive the board's accessibility model — see §8.
 Tokens are `<g class="token" data-token-id>` elements translated to `cellCenter`. Movement
 animation steps cell-to-cell (~90ms per cell, honouring `prefers-reduced-motion` by jumping).
 All colours come from CSS custom properties `--p0..--p4` so themes work.
@@ -218,8 +241,11 @@ for ink on a seat colour; styles.css defines `--p-ink` per `.pN`.
   dice button (Space / click), move log, New game, and a rules `<details>` panel.
 * Flow: roll -> if no moves, toast + auto pass after 700ms -> else highlight movable tokens;
   human clicks a token (or presses 1..4), bot auto-plays after ~550ms.
-* Keyboard: Space/Enter rolls, 1-4 select token, Esc closes dialogs. Everything focusable
-  has a visible focus ring. `aria-live="polite"` region announces every turn.
+* Keyboard: Space/Enter rolls, a digit selects that token, Esc closes dialogs — see §8.
+  Everything focusable has a visible focus ring. An `aria-live="polite"` region announces
+  every turn, and every *rejected* pick is answered with the reason it was rejected.
+* The dice hint names the real token range (`1-2`, `1-3` or `1-4`), matching the pick
+  prompt; neither is hard-coded.
 * Responsive: board scales to `min(92vw, 78vh)`; panels stack under 900px. Dark mode via
   `prefers-color-scheme` plus a manual toggle persisted in `localStorage` (wrapped in try/catch).
 * Game state persisted to `localStorage` after each move; offer "Resume game" if present.
@@ -230,6 +256,41 @@ Note: the bare directory form `node --test ludo/test` fails on Node 22.x (it tri
 `require` the directory). Use the glob form above.
 
 Cover: ring closure & geometry adjacency, start/entry offsets, safe-cell set, progress mapping,
-exit-on-six only, exact-roll-to-goal, capture + no-capture-on-safe, blocks (land + pass),
-three-sixes forfeit, extra-turn cases, finish/rank ordering, full seeded 5-bot game reaching
-`phase:'over'` within a sane move budget, and state immutability.
+the six-row arm grid (no empty middle-column slot, the innermost home cell docking the goal
+pentagon's vertex, no goal-wedge/cell overlap, four tokens fitting a wedge), the seat palette
+(deuteranopia + protanopia separation in both themes, 4.5:1 ink, exact agreement with
+`css/styles.css`), exit-on-six only, exact-roll-to-goal, capture + no-capture-on-safe,
+blocks (land + pass), three-sixes forfeit, extra-turn cases, finish/rank ordering, full seeded
+5-bot game reaching `phase:'over'` within a sane move budget, and state immutability.
+
+`test/browser-a11y.mjs` is a separate, manual smoke check — it drives a real Chromium through
+Playwright and is deliberately **not** matched by the `*.test.mjs` glob. Run it with
+`NODE_PATH=$(npm root -g) node ludo/test/browser-a11y.mjs`; it starts `serve.mjs` on a free
+port itself, prints a per-check summary and exits non-zero on failure. It needs Playwright and
+Chromium installed globally — the app itself stays dependency-free and no-build.
+
+## 8. Accessibility model (board + keyboard)
+
+* **Roving tabindex on the board.** Outside a pick exactly **one** token carries
+  `tabindex="0"` (the last one focused, else the human seat's first token); every other
+  token is `tabindex="-1"`. Tab therefore enters the board once and leaves again, instead
+  of walking 20 tokens. During a human pick every *movable* token is a tab stop.
+* **Arrow keys / Home / End** move focus token-to-token within the board (wrapping, in
+  token order) without creating extra tab stops. The renderer's `focusin` handler makes
+  whatever the user focuses the new roving stop.
+* **Roles.** Only the seat the user actually plays (`humanSeat`) gets `role="button"`;
+  every other seat's tokens are `role="img"`. `aria-disabled="true"` marks the user's own
+  tokens that cannot be played this turn — they stay arrow-reachable, and CSS dims them.
+* **Labels** carry movability, e.g. `You token 3, in base, cannot move this turn`.
+* **Focus never parks on `<body>`.** Disabling the dice at roll time blurs it, so the pick
+  phase focuses the first movable token; after the move focus returns to the dice.
+* **Every rejected input speaks.** Any digit `0-9`, from any focus (dice, buttons, the log
+  `<summary>`, `<body>`), and any click or tap on a token — including while a bot plays —
+  routes through `rejectReason()`, which writes both `#turn-detail` and the live region and
+  says *why* ("Token 3 is in base — you need a 6.", "It's Aarav's turn — wait for the bot.",
+  "There is no token 5 — press 1-4."). An identical repeated message is cleared and re-set
+  on the next frame so a screen reader speaks it again. Consequently the board must stay
+  pointer-interactive while `body.is-busy`; the busy state is enforced in JS, not by
+  `pointer-events: none`.
+* A screen-reader-only `<h1>` names the game screen, and dismissing the results dialog
+  restores focus to the control that is still on screen.

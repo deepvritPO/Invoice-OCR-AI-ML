@@ -108,7 +108,24 @@ export function createRenderer(svgEl, opts = {}) {
   /** id -> {x, y, scale} — where each token currently sits on screen. */
   const positions = new Map();
   const layers = new Map();
+  /** rAF ids with a frame still scheduled. Bounded by the number of live animations. */
   const liveFrames = new Set();
+  /** Resolvers of animate() promises that have not settled yet. */
+  const pending = new Set();
+
+  /**
+   * Accessibility view of the board, kept here so sync(), pulseTokens(), clearPulse()
+   * and relabel() can never disagree about a token's movability.
+   *   movable   — ids the active player may move right now
+   *   pickPhase — a human is being asked to choose one of them
+   *   humanSeat — the player id whose tokens this browser's user owns, or null
+   */
+  const a11y = { movable: new Set(), pickPhase: false, humanSeat: null };
+  /** Token id holding the single tab stop outside the pick phase (roving tabindex). */
+  let rovingId = null;
+
+  /** The most recent state handed to sync(); label refreshes read it. */
+  let lastState = null;
 
   let animChain = Promise.resolve();
   let diceChain = Promise.resolve();
@@ -129,23 +146,39 @@ export function createRenderer(svgEl, opts = {}) {
     }
     return new Promise((resolve) => {
       let startTs = null;
+      let frameId = 0;
+      const settle = () => { pending.delete(settle); resolve(); };
       const tick = (ts) => {
+        liveFrames.delete(frameId); // this frame has fired; it can no longer be cancelled
         if (disposed) {
-          resolve();
+          settle();
           return;
         }
         if (startTs === null) startTs = ts;
         const p = clamp((ts - startTs) / duration, 0, 1);
         step(p);
         if (p < 1) {
-          const next = requestAnimationFrame(tick);
-          liveFrames.add(next);
+          frameId = requestAnimationFrame(tick);
+          liveFrames.add(frameId);
         } else {
-          resolve();
+          settle();
         }
       };
-      liveFrames.add(requestAnimationFrame(tick));
+      frameId = requestAnimationFrame(tick);
+      liveFrames.add(frameId);
+      pending.add(settle);
     });
+  }
+
+  /**
+   * Stop every animation in flight. Cancelling a frame alone would wedge the caller,
+   * because the awaited promise from animate() would never settle — so settle them all.
+   */
+  function cancelAnimations() {
+    for (const id of liveFrames) cancelAnimationFrame(id);
+    liveFrames.clear();
+    for (const settle of [...pending]) settle();
+    pending.clear();
   }
 
   /** Board animations never overlap: each one waits for the previous to settle. */
@@ -314,6 +347,7 @@ export function createRenderer(svgEl, opts = {}) {
     buildGoal(layers.get('layer-goal'));
     svgEl.addEventListener('click', handleClick);
     svgEl.addEventListener('keydown', handleKeyDown);
+    svgEl.addEventListener('focusin', handleFocusIn);
     if (opts.onCellHover) {
       svgEl.addEventListener('pointerover', handleHover);
       svgEl.addEventListener('pointerout', handleHover);
@@ -329,8 +363,10 @@ export function createRenderer(svgEl, opts = {}) {
       class: `token p${player.id}`,
       'data-token-id': token.id,
       'data-player': player.id,
-      tabindex: 0,
-      role: 'button',
+      // Roving tabindex: applyTabStops() promotes exactly one token (or, during a
+      // human's pick, every movable one). Twenty permanent tab stops is not usable.
+      tabindex: -1,
+      role: 'img',
     }, layers.get('layer-tokens'));
     el('circle', {
       class: `token-disc p${player.id}`, cx: 0, cy: 0, r: r2(tokenR),
@@ -412,15 +448,85 @@ export function createRenderer(svgEl, opts = {}) {
   }
 
   function describe(player, token, number) {
-    if (token.place === 'base') return `${player.name} token ${number}, in base`;
-    if (token.place === 'goal') return `${player.name} token ${number}, home`;
-    return `${player.name} token ${number}, ${token.t} steps along`;
+    const where = token.place === 'base' ? 'in base'
+      : token.place === 'goal' ? 'home'
+        : `${token.t} steps along`;
+    const head = `${player.name} token ${number}, ${where}`;
+    // Movability is otherwise signalled only by a coloured stroke and a pulse, which
+    // is nothing at all to a screen reader.
+    if (!a11y.pickPhase || !ownedByUser(player.id)) return head;
+    return a11y.movable.has(token.id) ? `${head}, ready to move` : `${head}, cannot move this turn`;
+  }
+
+  const ownedByUser = (playerId) => a11y.humanSeat !== null && playerId === a11y.humanSeat;
+
+  /**
+   * The single funnel for a token's accessible state. sync(), pulseTokens(),
+   * clearPulse() and relabel() all come through here, so the label, the role, the
+   * disabled state and the CSS class can never drift out of step.
+   */
+  function applyTokenA11y(node, player, token, number) {
+    const g = node.group;
+    g.setAttribute('aria-label', describe(player, token, number));
+    g.classList.toggle('token--movable', a11y.movable.has(token.id));
+    if (ownedByUser(player.id)) {
+      // A control of the user's: keep it a button so its state can be announced,
+      // and mark it inert rather than removing it while they are choosing.
+      g.setAttribute('role', 'button');
+      if (a11y.pickPhase && !a11y.movable.has(token.id)) g.setAttribute('aria-disabled', 'true');
+      else g.removeAttribute('aria-disabled');
+    } else {
+      // Another seat's token — board information, not a control. Promising an
+      // action that can never fire is worse than exposing none.
+      g.setAttribute('role', 'img');
+      g.removeAttribute('aria-disabled');
+    }
+  }
+
+  const tokenOrder = () => [...tokens.keys()];
+
+  /**
+   * Exactly one tab stop on the board outside a pick, one per movable token during it.
+   * Everything else stays reachable with the arrow keys.
+   */
+  function applyTabStops() {
+    const ids = tokenOrder();
+    if (!ids.length) return;
+    if (a11y.pickPhase && a11y.movable.size) {
+      for (const id of ids) {
+        const node = tokens.get(id);
+        if (node) node.group.setAttribute('tabindex', a11y.movable.has(id) ? '0' : '-1');
+      }
+      return;
+    }
+    if (!rovingId || !tokens.has(rovingId)) {
+      rovingId = ids.find((id) => id.startsWith(`p${a11y.humanSeat}t`)) || ids[0];
+    }
+    for (const id of ids) {
+      const node = tokens.get(id);
+      if (node) node.group.setAttribute('tabindex', id === rovingId ? '0' : '-1');
+    }
+  }
+
+  /** Re-apply labels and tab stops to every token after the a11y view changes. */
+  function refreshTokenA11y() {
+    for (const player of (lastState && lastState.players) || []) {
+      for (const token of player.tokens || []) {
+        const node = tokens.get(token.id);
+        if (node) applyTokenA11y(node, player, token, tokenNumber(token));
+      }
+    }
+    applyTabStops();
   }
 
   function sync(state, view = {}) {
     const movable = new Set(view.movableTokenIds || []);
     const selected = view.selectedTokenId || null;
     const active = Number.isInteger(view.activePlayer) ? view.activePlayer : state.turn;
+    a11y.movable = movable;
+    a11y.pickPhase = view.pickPhase === true;
+    a11y.humanSeat = Number.isInteger(view.humanSeat) ? view.humanSeat : null;
+    lastState = state;
 
     const entries = [];
     const shared = new Map();
@@ -468,9 +574,8 @@ export function createRenderer(svgEl, opts = {}) {
       const number = tokenNumber(token);
       if (node.label.textContent !== String(number)) node.label.textContent = String(number);
       node.group.setAttribute('transform', transformOf(entry.x, entry.y, entry.scale));
-      node.group.setAttribute('aria-label', describe(player, token, number));
+      applyTokenA11y(node, player, token, number);
       const cl = node.group.classList;
-      cl.toggle('token--movable', movable.has(token.id));
       cl.toggle('token--selected', selected === token.id);
       cl.toggle('token--goal', entry.at === 'goal');
       cl.toggle('token--base', entry.at === 'base');
@@ -484,8 +589,10 @@ export function createRenderer(svgEl, opts = {}) {
       node.group.remove();
       tokens.delete(id);
       positions.delete(id);
+      if (rovingId === id) rovingId = null;
     }
 
+    applyTabStops();
     highlightActive(active);
   }
 
@@ -510,12 +617,15 @@ export function createRenderer(svgEl, opts = {}) {
   }
 
   function pulseTokens(tokenIds) {
-    const wanted = new Set(tokenIds || []);
-    for (const [id, node] of tokens) node.group.classList.toggle('token--movable', wanted.has(id));
+    a11y.movable = new Set(tokenIds || []);
+    a11y.pickPhase = true;
+    refreshTokenA11y();
   }
 
   function clearPulse() {
-    for (const node of tokens.values()) node.group.classList.remove('token--movable');
+    a11y.movable = new Set();
+    a11y.pickPhase = false;
+    refreshTokenA11y();
   }
 
   // -------------------------------------------------------------------------
@@ -540,7 +650,9 @@ export function createRenderer(svgEl, opts = {}) {
 
   function relabel(node, state, playerId, tokenId) {
     const { player, token } = lookUp(state, playerId, tokenId);
-    if (token) node.group.setAttribute('aria-label', describe(player, token, tokenNumber(token)));
+    // Through the same funnel as sync(): an animation must not strip the movability
+    // suffix, the role or aria-disabled that the pick phase just put on.
+    if (token) applyTokenA11y(node, player, token, tokenNumber(token));
   }
 
   function animateMove(event, state) {
@@ -755,12 +867,68 @@ export function createRenderer(svgEl, opts = {}) {
     if (id && opts.onTokenClick) opts.onTokenClick(id);
   }
 
+  const ROVE = {
+    ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1,
+  };
+
+  /** Move the roving stop `delta` places, or to `absolute` ('first' | 'last'). */
+  function rove(fromId, delta, absolute) {
+    const ids = tokenOrder();
+    if (!ids.length) return;
+    let next;
+    if (absolute === 'first') next = ids[0];
+    else if (absolute === 'last') next = ids[ids.length - 1];
+    else {
+      const here = ids.indexOf(fromId);
+      next = ids[(((here < 0 ? 0 : here) + delta) % ids.length + ids.length) % ids.length];
+    }
+    const node = tokens.get(next);
+    if (!node) return;
+    // During a pick the tab stops belong to the movable tokens; roving still lets the
+    // player read every square, it just must not add a second stop behind their back.
+    if (!a11y.pickPhase || !a11y.movable.size) {
+      rovingId = next;
+      applyTabStops();
+    }
+    node.group.focus({ preventScroll: true });
+  }
+
   function handleKeyDown(ev) {
-    if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') return;
     const id = tokenIdFrom(ev.target);
     if (!id) return;
-    ev.preventDefault();
-    if (opts.onTokenClick) opts.onTokenClick(id);
+    if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar') {
+      // Outside a pick, Space on a token belongs to the dice — ui.js rolls it.
+      if (!a11y.pickPhase) return;
+      ev.preventDefault();
+      ev.stopPropagation();          // ui.js must not re-dispatch the same activation
+      if (opts.onTokenClick) opts.onTokenClick(id);
+      return;
+    }
+    if (ev.key in ROVE) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      rove(id, ROVE[ev.key]);
+      return;
+    }
+    if (ev.key === 'Home') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      rove(id, 0, 'first');
+      return;
+    }
+    if (ev.key === 'End') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      rove(id, 0, 'last');
+    }
+  }
+
+  /** Whatever the player last focused becomes the board's one tab stop. */
+  function handleFocusIn(ev) {
+    const id = tokenIdFrom(ev.target);
+    if (!id || !tokens.has(id)) return;
+    rovingId = id;
+    if (!a11y.pickPhase || !a11y.movable.size) applyTabStops();
   }
 
   function handleHover(ev) {
@@ -782,12 +950,16 @@ export function createRenderer(svgEl, opts = {}) {
   function clearBoard() {
     svgEl.removeEventListener('click', handleClick);
     svgEl.removeEventListener('keydown', handleKeyDown);
+    svgEl.removeEventListener('focusin', handleFocusIn);
     if (opts.onCellHover) {
       svgEl.removeEventListener('pointerover', handleHover);
       svgEl.removeEventListener('pointerout', handleHover);
     }
+    cancelAnimations();
     while (svgEl.firstChild) svgEl.removeChild(svgEl.firstChild);
     tokens.clear();
+    rovingId = null;
+    lastState = null;
     badges.clear();
     positions.clear();
     layers.clear();
@@ -795,8 +967,7 @@ export function createRenderer(svgEl, opts = {}) {
 
   function destroy() {
     disposed = true;
-    for (const id of liveFrames) cancelAnimationFrame(id);
-    liveFrames.clear();
+    cancelAnimations();
     clearBoard();
     svgEl.removeAttribute('data-active-player');
     const { button } = diceNodes();
@@ -813,6 +984,7 @@ export function createRenderer(svgEl, opts = {}) {
     animateCapture,
     pulseTokens,
     clearPulse,
+    cancelAnimations,
     setDice,
     shakeDice,
     destroy,

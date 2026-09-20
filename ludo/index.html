@@ -9,8 +9,11 @@
 <link rel="stylesheet" href="./css/styles.css">
 <script>
   // Apply the stored theme before first paint so the page never flashes the wrong palette.
+  // This runs long before js/ui.js loads, so the key literal lives here and is published
+  // on window for ui.js to reuse — one source of truth, no chance of the two drifting.
+  window.LUDO_THEME_KEY = 'pentagon-ludo:v1:theme';
   try {
-    var savedTheme = localStorage.getItem('pentagon-ludo:v1:theme');
+    var savedTheme = localStorage.getItem(window.LUDO_THEME_KEY);
     if (savedTheme === 'light' || savedTheme === 'dark') {
       document.documentElement.dataset.theme = savedTheme;
     }
@@ -42,6 +45,8 @@
 
   <!-- ─────────────────────────  SETUP SCREEN  ───────────────────────── -->
   <section id="screen-setup" class="screen screen-setup" aria-label="Game setup">
+
+    <p id="resume-error" class="muted" role="status" hidden>That saved game could not be loaded, so it has been discarded. Set up a new table below.</p>
 
     <div id="resume-card" class="resume-card" hidden>
       <div>
@@ -232,6 +237,10 @@
   <!-- ─────────────────────────  GAME SCREEN  ───────────────────────── -->
   <section id="screen-game" class="screen screen-game" aria-label="Game board" hidden>
 
+    <!-- The document's only other h1 is inside #screen-setup, which is hidden during
+         play, so the game screen would otherwise start its heading outline at level 2. -->
+    <h1 class="sr-only">Pentagon Ludo</h1>
+
     <div class="board-wrap">
       <svg id="board" viewBox="0 0 1000 1000" role="img" aria-label="Ludo board"></svg>
     </div>
@@ -245,7 +254,7 @@
           <button type="button" id="dice" class="dice" aria-label="Roll the dice">
             <span id="dice-face">·</span>
           </button>
-          <p id="dice-hint" class="hint">Click the dice, or press <kbd>Space</kbd>. Then pick a token by clicking it or pressing <kbd>1</kbd>–<kbd>4</kbd>.</p>
+          <p id="dice-hint" class="hint">Click the dice, or press <kbd>Space</kbd>. Then pick a token by clicking it or pressing <kbd>1</kbd>–<kbd id="dice-hint-max">4</kbd>.</p>
         </div>
       </div>
 
